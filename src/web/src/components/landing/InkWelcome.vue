@@ -316,12 +316,11 @@ onUnmounted(() => {
    own platform is the lit slab with a coloured glow beneath it. */
 .download {
   position: relative; isolation: isolate;
-  display: block; min-width: 264px; height: 80px;
+  display: block; width: 232px; height: 80px;
   border-radius: 22px; text-decoration: none; color: var(--ink);
   transition: transform 260ms cubic-bezier(.23, 1, .32, 1);
   touch-action: manipulation;
 }
-.download[data-primary="true"] { min-width: 328px; }
 /* No fill: the ink shows only on the edge. The mask cuts the middle out of the ring. */
 .download-ring {
   position: absolute; inset: 0; z-index: -1; overflow: hidden; border-radius: inherit;
@@ -349,14 +348,14 @@ onUnmounted(() => {
 }
 .download-face {
   position: absolute; inset: 1.5px; border-radius: 20.5px;
-  display: flex; align-items: center; gap: 16px; padding: 0 18px 0 24px;
+  display: flex; align-items: center; justify-content: center; gap: 14px; padding: 0 20px;
   background: none;
   text-align: left;
 }
 .download[data-primary="true"] .download-face { inset: 2px; border-radius: 20px; }
 .download-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; }
 .download-icon :deep(svg), .download-icon > svg { width: 28px; height: 28px; }
-.download-text { display: grid; gap: 6px; flex: 1 1 auto; }
+.download-text { display: grid; flex: 0 0 auto; }
 .download-name { font: 650 21px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
 .download-arrow {
   display: grid; place-items: center; flex: 0 0 38px; width: 38px; height: 38px; border-radius: 50%;
@@ -394,11 +393,11 @@ onUnmounted(() => {
 @media (max-width: 760px) {
   .welcome h1 { font-size: clamp(32px, 9.6vw, 44px); }
   .downloads { display: grid; grid-template-columns: 1fr 1fr; width: 100%; max-width: 420px; gap: 10px; }
-  .download, .download[data-primary="true"] { min-width: 0; height: 64px; border-radius: 18px; }
+  .download { width: auto; min-width: 0; height: 64px; border-radius: 18px; }
   .download[data-primary="true"] { grid-column: 1 / -1; height: 72px; }
   .download[data-primary="false"]:nth-child(2):last-child { grid-column: 1 / -1; }
-  .download-face { gap: 10px; padding: 0 10px 0 14px; border-radius: 16.5px; }
-  .download[data-primary="true"] .download-face { gap: 14px; padding: 0 14px 0 20px; border-radius: 16px; }
+  .download-face { gap: 10px; padding: 0 12px; border-radius: 16.5px; }
+  .download[data-primary="true"] .download-face { gap: 14px; padding: 0 16px; border-radius: 16px; }
   .download[data-primary="false"] .download-arrow { display: none; }
   .download-icon { width: 24px; height: 24px; flex-basis: 24px; }
   .download-icon :deep(svg), .download-icon > svg { width: 22px; height: 22px; }
