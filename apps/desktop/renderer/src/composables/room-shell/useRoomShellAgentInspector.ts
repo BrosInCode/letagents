@@ -23,6 +23,7 @@ import { supervisorEntriesResourceFreshness } from "../../domain/supervisor-entr
 import { ownerAttribution as ownerAttributionLabel } from "../../components/desktop/content/room-activity/agentTarget";
 import { useAgentCorrectionHandoff } from "../../components/desktop/content/room-shell/useAgentCorrectionHandoff";
 import { useAgentInspectorObservations } from "../../components/desktop/content/room-shell/useAgentInspectorObservations";
+import { useAgentInspectorRuntimeRefresh } from "../../components/desktop/content/room-shell/useAgentInspectorRuntimeRefresh";
 import { useAgentInspectorConfigurationApply } from "../../components/desktop/content/room-shell/useAgentInspectorConfigurationApply";
 import type { AgentInspectorRequest, AgentModalTarget } from "../../components/desktop/content/desktop-chat-message/types";
 import { desktopIpc } from "../../ipc/index.js";
@@ -361,7 +362,8 @@ export function useRoomShellAgentProjections(context: unknown) {
 /** Reset the inspector on focus changes, and follow the live session. */
 export function useRoomShellInspectorWatchers(context: unknown) {
   const {
-    agentInspectorConfigurationResource, agentInspectorRequestState, loadAgentInspectorSettings,
+    agentInspectorActionState, agentInspectorConfigurationResource, agentInspectorRequestState,
+    agentInspectorSettingsSelectionCurrent, loadAgentInspectorSettings,
     openAgentInspectorLive, selectedAgentDetailProjection, selectedAgentDetailRequestVersion,
   } = context as RoomShellContextOf<
       "useRoomShellAgentProjections"
@@ -369,6 +371,7 @@ export function useRoomShellInspectorWatchers(context: unknown) {
     | "useRoomShellInspectorSettings"
     | "useRoomShellState"
   >;
+  useAgentInspectorRuntimeRefresh({ projection: selectedAgentDetailProjection, resource: agentInspectorConfigurationResource, requestState: agentInspectorRequestState, actionState: agentInspectorActionState, selectionCurrent: agentInspectorSettingsSelectionCurrent });
   // Identity can resolve after the panel opens from a historical message.
   watch([() => selectedAgentDetailProjection.value?.entryId, selectedAgentDetailRequestVersion], ([entryId]) => {
     if (entryId && agentInspectorConfigurationResource.value.status === "idle") void loadAgentInspectorSettings();
