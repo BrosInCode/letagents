@@ -1499,6 +1499,8 @@ async function respawnHarness(options: { respawn?: SupervisorDaemonLifecycleOpti
   const harness = {
     env, lifecycleLogPath,
     servers: [] as Server[],
+    /** Wire daemons still starting: teardown must close them too, or a listening socket keeps the process alive. */
+    starting: [] as Array<Promise<unknown>>,
     children: [] as ChildProcess[],
     spawnTimes: [] as number[],
     serve: true,
@@ -1507,6 +1509,8 @@ async function respawnHarness(options: { respawn?: SupervisorDaemonLifecycleOpti
     client: null as unknown as SupervisorDaemonClient,
     cleanup: async () => {
       harness.client.stopAutoRespawn();
+      await Promise.allSettled(harness.starting);
+      await Promise.allSettled([(harness.client as unknown as { ensureOperation: Promise<unknown> | null }).ensureOperation]);
       for (const server of harness.servers) await closeServer(server, env.socketPath);
       if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
       else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
@@ -1523,8 +1527,8 @@ async function respawnHarness(options: { respawn?: SupervisorDaemonLifecycleOpti
       harness.children.push(child);
       harness.spawnTimes.push(Date.now());
       if (harness.serve) {
-        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 10 + harness.children.length, options.onPrepare)
-          .then((started) => { harness.servers.push(started.server); });
+        harness.starting.push(startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 10 + harness.children.length, options.onPrepare)
+          .then((started) => { harness.servers.push(started.server); }));
       }
       return child;
     },
@@ -1608,6 +1612,7 @@ test("an attached daemon that dies unexpectedly is respawned; an intentional ret
     const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
     process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
     const wires: Array<Awaited<ReturnType<typeof startWireDaemon>>> = [];
+    const starting: Array<Promise<unknown>> = [];
     let alive = true;
     let spawns = 0;
     let retire: () => void = () => undefined;
@@ -1621,7 +1626,7 @@ test("an attached daemon that dies unexpectedly is respawned; an intentional ret
         spawns++;
         const child = new EventEmitter() as ChildProcess;
         Object.defineProperty(child, "pid", { value: 901 });
-        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 26).then((w) => { wires.push(w); });
+        starting.push(startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 26).then((w) => { wires.push(w); }));
         return child;
       },
     });
@@ -1644,6 +1649,8 @@ test("an attached daemon that dies unexpectedly is respawned; an intentional ret
       }
     } finally {
       client.stopAutoRespawn();
+      await Promise.allSettled(starting);
+      await Promise.allSettled([(client as unknown as { ensureOperation: Promise<unknown> | null }).ensureOperation]);
       for (const w of wires) await closeServer(w.server, env.socketPath);
       if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
       else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
