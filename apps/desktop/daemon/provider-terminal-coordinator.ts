@@ -16,6 +16,9 @@ import type {
   ReconciliationNotice,
 } from "./types.js";
 
+/** How long after a planned replacement its restart is still shown as progress. */
+export const CONFIGURATION_RESTART_GRACE_MS = 60_000;
+
 export type ProviderTerminalPorts = {
   authority: {
     assertCurrent(): Promise<void>;
@@ -163,7 +166,7 @@ export class ProviderTerminalCoordinator {
   /** Entries an owner's recovery has taken over from their exit's recording, until it ends. */
   private readonly recoveries = new Map<string, number>();
   /** Entries whose runtime was replaced on purpose and whose new runtime has not yet taken over. */
-  private readonly configurationRestarts = new Set<string>();
+  private readonly configurationRestarts = new Map<string, { atMs: number }>();
   private readonly plannedConfigurationReplacements = new Map<
     ProviderInstallationToken,
     PlannedConfigurationReplacement
@@ -263,9 +266,12 @@ export class ProviderTerminalCoordinator {
    */
   configurationRestarting(entry: { id: string; observed_state: string }): boolean {
     if (this.configurationReplacementPlanned(entry.id)) return true;
-    if (!this.configurationRestarts.has(entry.id)) return false;
-    if (entry.observed_state === "starting" || entry.observed_state === "recovering") return true;
-    // The new runtime has taken over (or the agent stopped): the restart is over.
+    const restart = this.configurationRestarts.get(entry.id);
+    if (!restart) return false;
+    if ((entry.observed_state === "starting" || entry.observed_state === "recovering")
+      && this.ports.nowMs() - restart.atMs < CONFIGURATION_RESTART_GRACE_MS) return true;
+    // The new runtime has taken over, the agent stopped, or the restart took
+    // too long: the normal projection applies, so a real failure is shown.
     this.configurationRestarts.delete(entry.id);
     return false;
   }
@@ -788,7 +794,7 @@ export class ProviderTerminalCoordinator {
         last_terminal: payload,
       };
       if (commitFence && entry.observed_state === observedState && entry.condition === "none" && recorded) return;
-      if (plannedConfigurationReplacement) this.configurationRestarts.add(entryId);
+      if (plannedConfigurationReplacement) this.configurationRestarts.set(entryId, { atMs: this.ports.nowMs() });
       await this.ports.transitionOnce(
         entryId,
         observedState,
