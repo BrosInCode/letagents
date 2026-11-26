@@ -31,13 +31,20 @@
       <div id="download-mac" class="downloads reveal" role="group" aria-label="Download the desktop app">
         <a v-for="(link, index) in downloadLinks" :key="link.href" class="download" :data-primary="index === 0"
           :href="link.href" @click="onDownload($event)">
-          <span class="download-icon" aria-hidden="true">
-            <DesktopPlatformIcon v-if="link.icon" :icon="link.icon" />
-            <svg v-else viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8" /><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
-          </span>
-          <span class="download-text">
-            <span class="download-kicker">Download for</span>
-            <span class="download-name">{{ link.name }}<small v-if="link.detail">{{ link.detail }}</small></span>
+          <span v-if="index === 0" class="download-glow" aria-hidden="true" />
+          <span class="download-ring" aria-hidden="true"><span class="download-spin" /></span>
+          <span class="download-face">
+            <span class="download-icon" aria-hidden="true">
+              <DesktopPlatformIcon v-if="link.icon" :icon="link.icon" />
+              <svg v-else viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8" /><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+            </span>
+            <span class="download-text">
+              <span class="download-kicker">Download for</span>
+              <span class="download-name">{{ link.name }}<small v-if="link.detail">{{ link.detail }}</small></span>
+            </span>
+            <span class="download-arrow" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 4v13m0 0-5.5-5.5M12 17l5.5-5.5M5 20.5h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            </span>
           </span>
         </a>
       </div>
@@ -305,41 +312,72 @@ onUnmounted(() => {
   margin-top: clamp(30px, 5vh, 48px);
   scroll-margin-top: calc(92px + env(safe-area-inset-top, 0px));
 }
+/* Each button is an ink-edged slab: a slowly turning warm-and-mint edge (a transform, so the
+   compositor turns it without repainting), a face above it, and a download arrow. The visitor's
+   own platform is the lit slab with a coloured glow beneath it. */
 .download {
-  display: inline-flex; align-items: center; gap: 14px;
-  min-width: 196px; height: 64px; padding: 0 24px 0 18px; box-sizing: border-box;
-  border-radius: 16px; text-align: left; text-decoration: none;
-  color: var(--ink);
-  background: rgba(239, 238, 230, .05);
-  box-shadow: inset 0 0 0 1px rgba(239, 238, 230, .12), inset 0 1px 0 rgba(255, 255, 255, .06);
-  backdrop-filter: blur(14px) saturate(140%);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
-  transition: transform 160ms cubic-bezier(.23, 1, .32, 1), background-color 200ms ease, box-shadow 200ms ease;
+  position: relative; isolation: isolate;
+  display: block; min-width: 264px; height: 80px;
+  border-radius: 22px; text-decoration: none; color: var(--ink);
+  transition: transform 260ms cubic-bezier(.23, 1, .32, 1);
   touch-action: manipulation;
 }
-.download[data-primary="true"] {
-  min-width: 248px;
-  color: #0b0c0b;
-  background: linear-gradient(#f5f4ee, #e3e1d7);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .85), inset 0 -1px 0 rgba(0, 0, 0, .12),
-    0 1px 2px rgba(0, 0, 0, .5), 0 18px 44px -14px rgba(127, 224, 189, .38), 0 10px 30px -16px rgba(236, 160, 110, .4);
+.download[data-primary="true"] { min-width: 328px; color: #0b0c0b; }
+.download-ring {
+  position: absolute; inset: 0; z-index: -1; overflow: hidden; border-radius: inherit;
+  opacity: .55; transition: opacity 260ms ease;
 }
+.download[data-primary="true"] .download-ring { opacity: 1; }
+.download-spin {
+  position: absolute; left: 50%; top: 50%; width: 400px; aspect-ratio: 1;
+  background: conic-gradient(from 0deg, #f08a4b, rgba(240, 138, 75, 0) 22%, rgba(127, 224, 189, 0) 40%, #7fe0bd 52%, rgba(127, 224, 189, 0) 70%, rgba(240, 138, 75, 0) 82%, #f08a4b);
+  transform: translate(-50%, -50%) rotate(0deg);
+  animation: ink-turn 7s linear infinite;
+  will-change: transform;
+}
+.download[data-primary="false"] .download-spin { animation-duration: 11s; }
+.download-glow {
+  position: absolute; inset: 14px 8px -16px; z-index: -2; border-radius: 30px;
+  background: linear-gradient(90deg, rgba(240, 138, 75, .55), rgba(127, 224, 189, .6));
+  filter: blur(24px); opacity: .8;
+  transition: opacity 260ms ease, transform 260ms cubic-bezier(.23, 1, .32, 1);
+}
+.download-face {
+  position: absolute; inset: 1.5px; border-radius: 20.5px;
+  display: flex; align-items: center; gap: 16px; padding: 0 18px 0 24px;
+  background: linear-gradient(rgba(22, 23, 22, .94), rgba(12, 13, 12, .96));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07);
+  text-align: left;
+}
+.download[data-primary="true"] .download-face {
+  inset: 2px; border-radius: 20px;
+  background: linear-gradient(#f7f6f0, #e2e0d6);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), inset 0 -1px 0 rgba(0, 0, 0, .12);
+}
+.download-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; }
+.download-icon :deep(svg), .download-icon > svg { width: 28px; height: 28px; }
+.download-text { display: grid; gap: 6px; flex: 1 1 auto; }
+.download-kicker { font: 600 10.5px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .12em; text-transform: uppercase; white-space: nowrap; opacity: .5; }
+.download-name { font: 650 21px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
+.download-name small { margin-left: 8px; font-size: 13.5px; font-weight: 500; letter-spacing: -.01em; opacity: .5; }
+.download-arrow {
+  display: grid; place-items: center; flex: 0 0 38px; width: 38px; height: 38px; border-radius: 50%;
+  background: rgba(239, 238, 230, .07); box-shadow: inset 0 0 0 1px rgba(239, 238, 230, .1);
+  transition: background-color 260ms ease;
+}
+.download[data-primary="true"] .download-arrow { background: #0b0c0b; color: #f5f4ee; box-shadow: none; }
+.download-arrow svg { width: 17px; height: 17px; transition: transform 320ms cubic-bezier(.23, 1, .32, 1); }
 @media (hover: hover) and (pointer: fine) {
-  .download:hover { background-color: rgba(239, 238, 230, .09); box-shadow: inset 0 0 0 1px rgba(239, 238, 230, .2), inset 0 1px 0 rgba(255, 255, 255, .08); }
-  .download[data-primary="true"]:hover {
-    background: linear-gradient(#fbfaf5, #e9e7de);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .9), inset 0 -1px 0 rgba(0, 0, 0, .12),
-      0 1px 2px rgba(0, 0, 0, .5), 0 22px 52px -14px rgba(127, 224, 189, .5), 0 12px 36px -16px rgba(236, 160, 110, .5);
-  }
+  .download:hover { transform: translateY(-3px); }
+  .download:hover .download-ring { opacity: 1; }
+  .download:hover .download-glow { opacity: 1; transform: translateY(4px) scale(1.05); }
+  .download:hover .download-arrow { background-color: rgba(239, 238, 230, .14); }
+  .download[data-primary="true"]:hover .download-arrow { background-color: #000; }
+  .download:hover .download-arrow svg { transform: translateY(2px); }
 }
-.download:active { transform: scale(.97); }
-.download:focus-visible { outline: 2px solid rgba(127, 224, 189, .85); outline-offset: 3px; }
-.download-icon { display: grid; place-items: center; width: 24px; height: 24px; }
-.download-icon :deep(svg), .download-icon > svg { width: 22px; height: 22px; }
-.download-text { display: grid; gap: 4px; }
-.download-kicker { font: 500 11px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .04em; text-transform: uppercase; opacity: .55; }
-.download-name { font: 600 17px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.015em; white-space: nowrap; }
-.download-name small { margin-left: 7px; font-size: 13px; font-weight: 500; opacity: .55; }
+.download:active { transform: translateY(0) scale(.975); transition-duration: 120ms; }
+.download:focus-visible { outline: 2px solid rgba(127, 224, 189, .85); outline-offset: 4px; }
+@keyframes ink-turn { to { transform: translate(-50%, -50%) rotate(360deg); } }
 
 
 /* Pressed during the scene: show everything at once, without the stagger. */
@@ -351,16 +389,23 @@ onUnmounted(() => {
 
 @media (prefers-reduced-motion: reduce) {
   .line > span, .reveal, .welcome-mark { animation: fade 400ms ease both !important; }
-  .download { transition: none; }
+  .download, .download-ring, .download-glow, .download-arrow svg { transition: none; }
+  .download-spin { animation: none; }
 }
 
 @media (max-width: 760px) {
   .welcome h1 { font-size: clamp(32px, 9.6vw, 44px); }
   .downloads { display: grid; grid-template-columns: 1fr 1fr; width: 100%; max-width: 420px; gap: 10px; }
-  .download { min-width: 0; height: 56px; padding: 0 14px; gap: 10px; backdrop-filter: none; -webkit-backdrop-filter: none; background-color: rgba(20, 21, 20, .72); }
-  .download[data-primary="true"] { grid-column: 1 / -1; min-width: 0; height: 60px; justify-content: center; }
-  .download[data-primary="false"]:nth-child(2):last-child { grid-column: 1 / -1; justify-content: center; }
-  .download-name { font-size: 15px; }
+  .download, .download[data-primary="true"] { min-width: 0; height: 64px; border-radius: 18px; }
+  .download[data-primary="true"] { grid-column: 1 / -1; height: 72px; }
+  .download[data-primary="false"]:nth-child(2):last-child { grid-column: 1 / -1; }
+  .download-face { gap: 10px; padding: 0 10px 0 14px; border-radius: 16.5px; }
+  .download[data-primary="true"] .download-face { gap: 14px; padding: 0 14px 0 20px; border-radius: 16px; }
+  .download[data-primary="false"] .download-arrow { display: none; }
+  .download-icon { width: 24px; height: 24px; flex-basis: 24px; }
+  .download-icon :deep(svg), .download-icon > svg { width: 22px; height: 22px; }
+  .download-name { font-size: 16px; }
+  .download[data-primary="true"] .download-name { font-size: 19px; }
   .download-name small { font-size: 12px; }
 }
 </style>
