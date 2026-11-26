@@ -143,6 +143,7 @@ function startDesktopApp(): void {
 
   app.on("before-quit", () => {
     recordDesktopExit(lifecycleLog, "desktop_quit");
+    supervisorDaemonClient.stopAutoRespawn();
     allowMainWindowQuit();
     setDesktopNotificationBadgeCount(0);
     stopDesktopUpdates();
