@@ -130,6 +130,9 @@ async function createApplicationIcon() {
   await rm(iconset, { recursive: true, force: true });
 }
 
+/** Electron's MIT license and Chromium's third-party notices, as Electron ships them. */
+const ELECTRON_NOTICE_FILES = ["LICENSE", "LICENSES.chromium.html"];
+
 async function assembleMacBundle() {
   await cp(join(root, "node_modules", "electron", "dist", "Electron.app"), bundle, {
     recursive: true,
@@ -173,6 +176,11 @@ async function assembleMacBundle() {
   await execFileAsync("plutil", ["-insert", "CFBundleURLTypes", "-json",
     JSON.stringify([{ CFBundleURLName: `${profile.productName} links`, CFBundleURLSchemes: [profile.protocol] }]), infoPlist]);
   await createApplicationIcon();
+  // Electron ships its own and Chromium's notices beside Electron.app, not in
+  // it; the Windows build copies the whole folder, so it has them already.
+  for (const notice of ELECTRON_NOTICE_FILES) {
+    await cp(join(root, "node_modules", "electron", "dist", notice), join(resources, notice));
+  }
 }
 
 // The Windows installer (package-windows.mjs) registers letagents:// links,
@@ -191,6 +199,12 @@ async function assembleWindowsBundle() {
   const brandedVersion = await readWindowsExecutableVersion(executable);
   if (brandedVersion !== windowsFileVersion(desktopVersion)) {
     throw new Error(`${WINDOWS_EXECUTABLE_NAME} reports version ${brandedVersion ?? "none"}; expected ${windowsFileVersion(desktopVersion)}.`);
+  }
+  // Electron's and Chromium's notices stay beside the executable, as Electron ships them.
+  for (const notice of ELECTRON_NOTICE_FILES) {
+    if (!(await stat(join(bundle, notice)).catch(() => null))?.isFile()) {
+      throw new Error(`The Windows app must ship Electron's ${notice} beside ${WINDOWS_EXECUTABLE_NAME}.`);
+    }
   }
 }
 
@@ -447,6 +461,13 @@ const required = [
   ...(windows ? [WINDOWS_EXECUTABLE_NAME, "resources/letagents.ico"] : []).map((relative) => ({
     absolutePath: join(bundle, relative),
     manifestPath: relative,
+  })),
+  // The notices Electron's and Chromium's licenses require, in
+  // Contents/Resources on macOS. (Windows keeps them beside the executable,
+  // where manifest paths cannot point: assembleWindowsBundle checks them.)
+  ...(windows ? [] : ELECTRON_NOTICE_FILES.map((notice) => {
+    const absolutePath = join(resources, notice);
+    return { absolutePath, manifestPath: bundlePath(absolutePath) };
   })),
   ...[
     "shared/agent-branch.mjs",

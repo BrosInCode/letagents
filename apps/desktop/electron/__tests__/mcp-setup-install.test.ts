@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -24,7 +24,26 @@ process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = userDataDirectory;
 // leaving the other selected target fully writable.
 await mkdir(join(configHome, ".cursor", "mcp.json"), { recursive: true });
 
-const { installLetAgentsMcpServers } = await import("../main/mcp-setup.js");
+// LetAgents entries only in the files Claude Code and the Antigravity CLI do
+// not read MCP servers from: they must not count as installed.
+const staleEntry = JSON.stringify({ mcpServers: { letagents: { command: "npx", args: ["-y", "letagents"] } } });
+await mkdir(join(configHome, ".claude"), { recursive: true });
+await writeFile(join(configHome, ".claude", "settings.json"), staleEntry);
+await mkdir(join(configHome, ".gemini"), { recursive: true });
+await writeFile(join(configHome, ".gemini", "settings.json"), staleEntry);
+
+const { buildMcpInstallState, installLetAgentsMcpServers } = await import("../main/mcp-setup.js");
+
+test("an entry Claude Code and Antigravity do not read is not reported as installed", async () => {
+  const state = await buildMcpInstallState();
+  for (const id of ["claude-code", "antigravity"] as const) {
+    assert.equal(state.targets.find((target) => target.id === id)?.status, "not_installed", id);
+  }
+  const claude = state.targets.find((target) => target.id === "claude-code");
+  assert.deepEqual(claude?.configPaths.map((location) => location.path), [join(configHome, ".claude.json")]);
+  const antigravity = state.targets.find((target) => target.id === "antigravity");
+  assert.deepEqual(antigravity?.configPaths.map((location) => location.path), [join(configHome, ".gemini", "config", "mcp_config.json")]);
+});
 
 test("keeps successful MCP installs and reports each failed target", async () => {
   const result = await installLetAgentsMcpServers(["claude-code", "cursor"]);
@@ -39,8 +58,9 @@ test("keeps successful MCP installs and reports each failed target", async () =>
   assert.match(result.message, /Claude Code installed/);
   assert.match(result.message, /Couldn't install Cursor/);
 
+  // ~/.claude.json did not exist: setup creates it, as `claude mcp add --scope user` does.
   const claudeConfig = JSON.parse(
-    await readFile(join(configHome, ".claude", "settings.json"), "utf8"),
+    await readFile(join(configHome, ".claude.json"), "utf8"),
   ) as { mcpServers?: { letagents?: { command?: string } } };
   assert.equal(claudeConfig.mcpServers?.letagents?.command, "npx");
 
@@ -52,4 +72,20 @@ test("keeps successful MCP installs and reports each failed target", async () =>
 
   const cursorDirectoryEntries = await readdir(join(configHome, ".cursor"));
   assert.deepEqual(cursorDirectoryEntries, ["mcp.json"]);
+});
+
+test("Antigravity setup writes the CLI's MCP config and keeps its other servers", async () => {
+  const path = join(configHome, ".gemini", "config", "mcp_config.json");
+  await mkdir(join(configHome, ".gemini", "config"), { recursive: true });
+  await writeFile(path, JSON.stringify({ mcpServers: { other: { command: "other-mcp" } } }));
+
+  const result = await installLetAgentsMcpServers(["antigravity"]);
+
+  assert.equal(result.success, true, result.message);
+  assert.equal(result.targets[0]?.status, "installed");
+  const config = JSON.parse(await readFile(path, "utf8")) as { mcpServers?: Record<string, { command?: string }> };
+  assert.equal(config.mcpServers?.other?.command, "other-mcp");
+  assert.equal(config.mcpServers?.letagents?.command, "npx");
+  // The old Gemini settings file is not where the CLI looks, and setup leaves it as it was.
+  assert.equal(await readFile(join(configHome, ".gemini", "settings.json"), "utf8"), staleEntry);
 });

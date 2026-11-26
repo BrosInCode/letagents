@@ -295,3 +295,24 @@ test("live demos ship the protocol and the same exact `ws` the server runs", asy
   assert.match(packager, /"shared\/live-demo\.mjs"/);
   assert.match(packager, /"live-demo-client\.js"/);
 });
+
+test("the macOS app ships Electron's and Chromium's notices, and the package check requires them", async () => {
+  const packager = await source(join(scriptsDirectory, "package-artifact.mjs"));
+  assert.match(packager, /const ELECTRON_NOTICE_FILES = \["LICENSE", "LICENSES\.chromium\.html"\];/);
+  // Copied from beside Electron.app into Contents/Resources...
+  assert.match(packager, /for \(const notice of ELECTRON_NOTICE_FILES\) \{\s+await cp\(join\(root, "node_modules", "electron", "dist", notice\), join\(resources, notice\)\);/);
+  // ...and required in the finished package: in the macOS manifest, and
+  // beside the Windows executable (where Electron's own folder has them).
+  assert.match(packager, /\.\.\.\(windows \? \[\] : ELECTRON_NOTICE_FILES\.map\(\(notice\) => \{\s+const absolutePath = join\(resources, notice\);/);
+  assert.match(packager, /for \(const notice of ELECTRON_NOTICE_FILES\) \{\s+if \(!\(await stat\(join\(bundle, notice\)\)/);
+});
+
+test("a failed R2 upload is retried with a fresh upload and the object's checksum is checked", async () => {
+  const workflow = await source(join(repositoryRoot, ".github", "workflows", "desktop-release.yml"));
+  const step = workflow.slice(workflow.indexOf("- name: Publish immutable versioned artifacts to R2"), workflow.indexOf("- name: Validate mutable release monotonicity"));
+  assert.match(step, /until aws s3 cp "\$\{artifact\}"/);
+  assert.match(step, /if \(\( upload_attempt >= 3 \)\); then/);
+  // An object left by a failed upload must hold these bytes, and so must the uploaded one.
+  assert.match(step, /exists with different bytes after a failed upload/);
+  assert.match(step, /done\s+remote_sha256=\$\(remote_sha256_of "\$\{object_key\}"\)\s+if \[\[ "\$\{remote_sha256\}" != "\$\{local_sha256\}" \]\]; then/);
+});
