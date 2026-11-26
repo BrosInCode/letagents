@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -10,6 +10,7 @@ import {
   AntigravityModelsSignInError,
   antigravitySessionModelRows,
   readAntigravityModelsOverAcp,
+  settleModelListSignIn,
   type AntigravityModelListDependencies,
 } from "../main/agents/antigravity-model-list.js";
 
@@ -31,6 +32,11 @@ class FakeAgy implements AntigravityChild {
   sessionNew: "models" | "empty" | "sign-in" | "silent" = "models";
   signInLine = false;
   exitAfterSignInLine = false;
+  /** Runs when session/new arrives, before the answer: agy's own work at session start. */
+  onSessionNew: () => void = () => {};
+  /** A log of what happened, shared between fakes to see their order. */
+  events: string[] = [];
+  name = "agy";
   private finish!: (exit: ProviderProcessExit) => void;
   private readonly lineListeners = new Set<(line: string) => void>();
 
@@ -42,7 +48,8 @@ class FakeAgy implements AntigravityChild {
   onDisconnect() { return () => {}; }
   stderrTail() { return ""; }
   markIntentionalClose() {}
-  async terminate() { this.terminated += 1; this.finish({ type: "exit", code: 0, signal: null }); return true; }
+  async terminate() { this.terminated += 1; this.events.push(`${this.name} stopped`); this.finish({ type: "exit", code: 0, signal: null }); return true; }
+  failToSpawn(error: Error) { this.finish({ type: "error", error }); }
 
   methods(): string[] {
     return this.received.map((message) => message.method!).filter(Boolean);
@@ -64,6 +71,8 @@ class FakeAgy implements AntigravityChild {
       if (this.exitAfterSignInLine) { this.finish({ type: "exit", code: 1, signal: null }); return; }
       this.send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { close: {} } } } });
     } else if (message.method === "session/new") {
+      this.events.push(`${this.name} session/new`);
+      this.onSessionNew();
       if (this.sessionNew === "silent") return;
       if (this.sessionNew === "sign-in") {
         this.send({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "Authentication required" } });
@@ -91,21 +100,28 @@ function harness(agy = new FakeAgy(), over: Partial<AntigravityModelListDependen
   const root = mkdtempSync(join(tmpdir(), "agy-model-list-"));
   roots.push(root);
   const folder = join(root, "model-list");
+  const ownerGeminiDir = join(root, "owner-gemini");
   const launches: Array<{ agyBin: string; args: string[]; cwd: string; env: Record<string, string> }> = [];
-  const shared: string[] = [];
   const deps: AntigravityModelListDependencies = {
     launchChild: (input) => { launches.push(input); return agy; },
-    shareSignIn: (dir) => { shared.push(dir); },
     workspaceRefusal: () => null,
     folder,
+    ownerGeminiDir,
     timeoutMs: 5_000,
     ...over,
   };
-  return { agy, deps, folder, launches, shared };
+  const ownerToken = join(ownerGeminiDir, "antigravity-cli", "antigravity-oauth-token");
+  const localToken = join(folder, "antigravity-cli", "antigravity-oauth-token");
+  return { agy, deps, folder, launches, ownerToken, localToken };
+}
+
+function writeToken(path: string, text: string) {
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, text);
 }
 
 test("the model list comes from session/new over ACP, and nothing else is asked of agy", async () => {
-  const { agy, deps, folder, launches, shared } = harness();
+  const { agy, deps, folder, launches } = harness();
   // What an earlier read left behind, which this read clears.
   for (const name of ["conversations", "brain", "implicit", "log"]) {
     mkdirSync(join(folder, "antigravity-cli", name), { recursive: true });
@@ -121,7 +137,6 @@ test("the model list comes from session/new over ACP, and nothing else is asked 
     { id: "claude-opus-5-5-high", label: "Claude Opus 5.5 (High)" },
   ]);
   assert.deepEqual(launches, [{ agyBin: "/bin/agy", args: ["acp", "--gemini-dir", folder], cwd: folder, env: {} }]);
-  assert.deepEqual(shared, [folder]);
   assert.deepEqual(agy.methods(), ["initialize", "session/new", "session/close"]);
   const init = agy.received[0]!.params!;
   assert.deepEqual(init.clientInfo, { name: "letagents", title: "LetAgents", version: "1" });
@@ -180,4 +195,78 @@ test("session rows skip entries without an id and repeats", () => {
     { modelId: "a-high", name: "A (High)" }, { name: "no id" }, { modelId: "a-high", name: "again" }, { modelId: "b" },
   ] } }), [{ id: "a-high", label: "A (High)" }, { id: "b", label: "b" }]);
   assert.deepEqual(antigravitySessionModelRows(null), []);
+});
+
+test("a missing agy says why it could not start", async () => {
+  const { agy, deps } = harness();
+  agy.failToSpawn(Object.assign(new Error("spawn agy ENOENT"), { code: "ENOENT" }));
+  await assert.rejects(readAntigravityModelsOverAcp("agy", deps), /Antigravity could not start: spawn agy ENOENT/);
+});
+
+test("the owner's file sign-in is linked in for the read and gone after it", async () => {
+  const { agy, deps, ownerToken, localToken } = harness();
+  writeToken(ownerToken, "owner-token");
+  let duringRead = "";
+  agy.onSessionNew = () => { duringRead = readFileSync(localToken, "utf8"); };
+  await readAntigravityModelsOverAcp("/bin/agy", deps);
+  assert.equal(duringRead, "owner-token");
+  assert.equal(existsSync(localToken), false);
+  assert.equal(readFileSync(ownerToken, "utf8"), "owner-token");
+});
+
+test("a sign-in agy writes into the folder during a read goes back to the owner when the owner has none", async () => {
+  const { agy, deps, ownerToken, localToken } = harness();
+  // The keychain did not answer in time: agy keeps the sign-in in its own folder.
+  agy.onSessionNew = () => writeToken(localToken, "moved-by-agy");
+  await readAntigravityModelsOverAcp("/bin/agy", deps);
+  assert.equal(readFileSync(ownerToken, "utf8"), "moved-by-agy");
+  assert.equal(existsSync(localToken), false);
+
+  // When the owner keeps a file sign-in already, agy's copy in this folder is removed and the owner's stays.
+  const second = harness();
+  writeToken(second.ownerToken, "owner-token");
+  second.agy.onSessionNew = () => { rmSync(second.localToken); writeToken(second.localToken, "agy-copy"); };
+  await readAntigravityModelsOverAcp("/bin/agy", second.deps);
+  assert.equal(readFileSync(second.ownerToken, "utf8"), "owner-token");
+  assert.equal(existsSync(second.localToken), false);
+});
+
+test("a sign-in left by a read the app did not finish goes back to the owner before the next read", () => {
+  const { deps, ownerToken, localToken } = harness();
+  writeToken(localToken, "left-behind");
+  utimesSync(localToken, new Date(1_000_000), new Date(1_000_000));
+  settleModelListSignIn(deps.folder, deps.ownerGeminiDir, 0);
+  assert.equal(readFileSync(ownerToken, "utf8"), "left-behind");
+  assert.equal(existsSync(localToken), false);
+  // An old file is not agy's work during a read that started later: it is removed, not moved.
+  const other = harness();
+  writeToken(other.localToken, "old");
+  utimesSync(other.localToken, new Date(1_000_000), new Date(1_000_000));
+  settleModelListSignIn(other.deps.folder, other.deps.ownerGeminiDir, Date.now() - 1_000);
+  assert.equal(existsSync(other.ownerToken), false);
+  assert.throws(() => lstatSync(other.localToken));
+});
+
+test("two reads of one folder run one after the other, even for two agy paths", async () => {
+  const events: string[] = [];
+  const first = new FakeAgy();
+  const second = new FakeAgy();
+  first.name = "first"; second.name = "second";
+  first.events = events; second.events = events;
+  const fakes = [first, second];
+  const { deps } = harness(first, { launchChild: () => fakes.shift()! });
+  const [a, b] = await Promise.all([
+    readAntigravityModelsOverAcp("/opt/agy-one", deps),
+    readAntigravityModelsOverAcp("/opt/agy-two", deps),
+  ]);
+  assert.equal(a.length, 3);
+  assert.equal(b.length, 3);
+  assert.deepEqual(events, ["first session/new", "first stopped", "second session/new", "second stopped"]);
+});
+
+test("without availableModels, the models come from the model setting", () => {
+  assert.deepEqual(antigravitySessionModelRows({ configOptions: [
+    { id: "mode", category: "mode", options: [{ value: "default", name: "Default" }] },
+    { id: "model", category: "model", options: [{ value: "gemini-4-neon", name: "Gemini 4 Neon" }, { group: "Other", options: [{ value: "gpt-oss-120b-medium", name: "GPT-OSS 120B" }] }] },
+  ] }), [{ id: "gemini-4-neon", label: "Gemini 4 Neon" }, { id: "gpt-oss-120b-medium", label: "GPT-OSS 120B" }]);
 });
