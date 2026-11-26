@@ -18,6 +18,30 @@ import { CLAUDE_DAEMON_BOOTSTRAP_PROMPT, guestHasOnlyRoomTools, hasReadyRoomWork
 import type { ClaudeCliChild, ClaudeStreamMessage } from "./types.js";
 
 /** CLI launch, the bootstrap turn, and the attach-path fence. */
+const PROCESS_EXIT_POLL_MS = 25;
+
+/**
+ * Waits for an exact process to stop, for at most `graceMs`. It returns as
+ * soon as its birth is gone (or no longer readable); the caller re-reads the
+ * identity and decides. A fixed sleep here held every restart of a live
+ * Claude process for the whole grace period, even when it exited at once.
+ */
+export async function waitUntilProcessNotAlive(
+  readIdentity: () => string | null | undefined,
+  birth: string,
+  graceMs: number,
+): Promise<void> {
+  const deadline = Date.now() + graceMs;
+  for (;;) {
+    let identity: string | null | undefined;
+    try { identity = readIdentity(); } catch { return; }
+    if (identity === undefined || identity === null || !sameProcessBirthIdentity(identity, birth)) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return;
+    await delay(Math.min(PROCESS_EXIT_POLL_MS, remaining));
+  }
+}
+
 export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
   protected async start(
     req: ProviderSpawnRequest,
@@ -382,7 +406,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
     // it must be terminal before any replacement generation exists.
     const signal = stop?.force ? "SIGKILL" : "SIGTERM";
     this.deps.signalProcess(connection.pid, signal, connection.processIdentity);
-    await delay(stop?.graceMs ?? this.stopGraceMs);
+    await waitUntilProcessNotAlive(readIdentity, connection.processIdentity, stop?.graceMs ?? this.stopGraceMs);
     const identityBeforeKill = readIdentity();
     if (identityBeforeKill === undefined) {
       throw new Error(
@@ -393,7 +417,7 @@ export class ClaudeAdapterLaunch extends ClaudeAdapterStream {
       if (stop?.force) throw new Error("Claude exact-reference stop has not yet proved the recorded process birth is gone.");
       this.deps.signalProcess(connection.pid, "SIGKILL", connection.processIdentity);
       if (stop) {
-        await delay(stop.graceMs);
+        await waitUntilProcessNotAlive(readIdentity, connection.processIdentity, stop.graceMs);
         const finalIdentity = readIdentity();
         if (finalIdentity === undefined || (finalIdentity !== null && sameProcessBirthIdentity(finalIdentity, connection.processIdentity))) {
           throw new Error("Claude exact-reference stop has not yet proved the recorded process birth is gone.");
