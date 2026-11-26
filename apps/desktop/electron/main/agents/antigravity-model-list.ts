@@ -101,8 +101,11 @@ export function antigravitySessionModelRows(session: unknown): AntigravityModelR
  * tell the two apart. After the read, and before the next one in case the app
  * ended during a read:
  * 1. The file the marker names is LetAgents' own: it is removed.
- * 2. Any other usable file is agy's. It goes back to the owner's folder when
- *    the owner has no file sign-in, and is removed when the owner has one.
+ * 2. Any other usable file is agy's. When the owner had a file sign-in as the
+ *    read started (something was placed), it is a refresh of that one and is
+ *    removed: a missing owner file then means the owner signed out. Otherwise
+ *    agy moved the keychain sign-in here: it goes back to the owner's folder,
+ *    unless the owner has a file sign-in by now.
  * 3. When it cannot go back, it stays here and agy uses it as it is.
  * Returns true in case 3.
  */
@@ -130,7 +133,10 @@ function readSignInMarker(folder: string): SignInMarker | null {
 }
 
 function writeSignInMarker(folder: string, marker: SignInMarker): void {
-  writeFileSync(join(folder, SIGN_IN_MARKER), JSON.stringify(marker), { mode: 0o600 });
+  // Written whole or not at all: a half-written marker would read as "nothing placed".
+  const partial = join(folder, `${SIGN_IN_MARKER}.partial`);
+  writeFileSync(partial, JSON.stringify(marker), { mode: 0o600 });
+  renameSync(partial, join(folder, SIGN_IN_MARKER));
 }
 
 export function settleModelListSignIn(folder: string, ownerGeminiDir: string): boolean {
@@ -145,8 +151,9 @@ export function settleModelListSignIn(folder: string, ownerGeminiDir: string): b
   const placedByLetAgents = marker !== null && ("placing" in marker
     // Nothing else runs while the sign-in is being placed, so whatever is here is LetAgents'.
     || (marker.placed !== null && samePlacedSignIn(marker.placed, placedIdentity(stat))));
+  const ownerHadFileSignIn = marker !== null && !("placing" in marker) && marker.placed !== null;
   const usable = stat.isFile() && stat.size > 0n;
-  if (placedByLetAgents || !usable || ownerAntigravityTokenFileExists(ownerGeminiDir)) {
+  if (placedByLetAgents || !usable || ownerHadFileSignIn || ownerAntigravityTokenFileExists(ownerGeminiDir)) {
     try { rmSync(local, { force: true }); } catch { /* removed on the next read */ }
     return false;
   }

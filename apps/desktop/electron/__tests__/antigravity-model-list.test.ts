@@ -263,6 +263,20 @@ test("a link LetAgents placed is removed, never moved, even after the owner sign
   assert.equal(existsSync(ownerToken), false, "the sign-out stays");
 });
 
+test("a refresh of the owner's file sign-in does not undo a sign-out during the read", async () => {
+  const { agy, deps, ownerToken, localToken } = harness();
+  writeToken(ownerToken, "owner-token");
+  agy.onSessionNew = () => {
+    // agy replaces the placed link with a refreshed token, and the owner signs out in a terminal.
+    rmSync(localToken);
+    writeToken(localToken, "refreshed");
+    rmSync(ownerToken);
+  };
+  await readAntigravityModelsOverAcp("/bin/agy", deps);
+  assert.equal(existsSync(ownerToken), false, "the sign-out stays");
+  assert.equal(existsSync(localToken), false);
+});
+
 test("after an unfinished read, agy's own sign-in goes back to the owner and a half-placed one is removed", () => {
   const agyWrote = harness();
   writeToken(agyWrote.localToken, "agy-wrote");
