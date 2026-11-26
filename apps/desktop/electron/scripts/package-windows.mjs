@@ -18,9 +18,11 @@ import {
   normalizeReleaseBaseUrl,
 } from "./release-metadata.mjs";
 import {
+  assertPayloadPathsFit,
   createNsisPayloadInclude,
   findMakensis,
   listPayloadEntries,
+  longestPayloadPath,
   payloadSizeKb,
   windowsFileVersion,
 } from "./windows-packaging.mjs";
@@ -71,6 +73,8 @@ await rm(nsisDirectory, { recursive: true, force: true });
 await mkdir(artifactsDirectory, { recursive: true });
 await mkdir(nsisDirectory, { recursive: true });
 
+// An update extracts below a staging folder; every path must still fit in MAX_PATH there.
+assertPayloadPathsFit(await longestPayloadPath(packagedApp));
 const payloadInclude = join(nsisDirectory, "payload.nsh");
 await writeFile(payloadInclude, createNsisPayloadInclude(await listPayloadEntries(packagedApp)));
 const makensis = findMakensis();
