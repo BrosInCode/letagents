@@ -39,12 +39,15 @@ function harness(t: TestContext) {
   return { clock, requests, script, ask, idle };
 }
 
-test("a lane that is not observing yet asks for the floor hold, as every poll did before", async (t) => {
-  const { requests, ask } = harness(t);
+test("a lane that is not observing yet asks for a one-second hold, so its owner is not left on Starting", async (t) => {
+  const { clock, requests, ask, idle } = harness(t);
   await ask({ observing: false });
   await ask({ observing: false });
-  assert.deepEqual(requests.map((request) => request.timeout), [25_000, 25_000]);
-  assert.deepEqual(requests[0], { origin: "https://letagents.test", timeout: 25_000, after: "msg_42", authorization: "Bearer worker-secret" });
+  assert.deepEqual(requests.map((request) => request.timeout), [1_000, 1_000]);
+  assert.deepEqual(requests[0], { origin: "https://letagents.test", timeout: 1_000, after: "msg_42", authorization: "Bearer worker-secret" });
+  assert.equal(clock.now, 2_000, "an idle room answers after the short hold, not after 25 s");
+  // The short answers prove nothing about the path: the first long poll is still the 50 s probe.
+  assert.deepEqual(await idle(1), [50_000]);
 });
 
 test("the idle polls of an observing lane go to 50 s in one step and stay there", async (t) => {
@@ -95,10 +98,10 @@ test("a failure that a 25 s poll would have met too is thrown as before, and the
     && error instanceof Error && error.message === "Supervised room poll failed with HTTP 503.");
   script.push({ openMs: 40, error: new TypeError("fetch failed") });
   await assert.rejects(ask(), /fetch failed/);
-  // The lane's next poll is its confirming one, at the floor.
+  // The lane's next poll is its confirming one, with the short first-answer hold.
   script.push({ openMs: 30_000, status: 502 });
   await assert.rejects(ask({ observing: false }), /HTTP 502/);
-  assert.deepEqual(requests.map((request) => request.timeout), [50_000, 50_000, 25_000], "no failure was asked again");
+  assert.deepEqual(requests.map((request) => request.timeout), [50_000, 50_000, 1_000], "no failure was asked again");
   assert.deepEqual(await idle(1), [50_000], "and no cool-down started");
   // Now 50 s is proven, and an early failure does not take the proof away:
   script.push({ openMs: 3_000, status: 503 });
