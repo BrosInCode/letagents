@@ -7,6 +7,7 @@ import {
   bindingMatchesRoomAgentGeneration,
   hasExactRoomAgentDeliveryOwner,
   projectRoomAgentManifestEntry,
+  CONFIGURATION_RESTART_DETAIL,
   RECORD_RESTART_PENDING_DETAIL,
   type RoomAgentStateProjectionInput,
 } from "../room-agent-state-projection.js";
@@ -283,6 +284,35 @@ test("a record the daemon is about to get past by itself is progress; one it cou
     assert.deepEqual(projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission, recordRecovery: reason })),
       projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission })));
   }
+});
+
+test("a restart the owner asked for, to apply settings, is progress; the same missing evidence otherwise still needs attention", () => {
+  const stopped = { room_id: "room_1", state: "stopped" as const, detail: "Ingress stopped by the supervisor.", execution_generation_id: "generation_1" };
+  for (const observed_state of ["idle", "recovering"] as const) {
+    const restarting = { ...entry, observed_state };
+    for (const lifecycleAdmission of ["unavailable", "pending"] as const) {
+      const projected = projectRoomAgentManifestEntry(facts({ entry: restarting, lifecycleAdmission, ingressHealth: stopped,
+        configurationRestarting: true, receipts: [] }));
+      assert.equal(projected.condition, "none", "the owner asked for the restart: nothing to fix");
+      assert.notEqual(projected.room_agent_state?.inbox.state, "blocked");
+      assert.equal(projected.room_agent_state?.connection.state, "reconnecting");
+      assert.equal(projected.room_agent_state?.ingress.state, "starting");
+      assert.equal(projected.room_agent_state?.inbox.detail, CONFIGURATION_RESTART_DETAIL);
+      assert.equal(agentInspectorOverallState(mapEntry(projected)), "reconnecting",
+        "shown as a restart, never Needs attention or Disconnected");
+    }
+    // The same evidence without a planned restart is a real readiness failure.
+    const failure = projectRoomAgentManifestEntry(facts({ entry: restarting, lifecycleAdmission: "unavailable", receipts: [] }));
+    assert.equal(failure.condition, "coordination_blocked");
+    assert.equal(failure.room_agent_state?.inbox.state, "blocked");
+    assert.equal(agentInspectorOverallState(mapEntry(failure)), "needs_attention");
+  }
+  // Once the new runtime is admitted, the restart no longer holds anything.
+  const ready = projectRoomAgentManifestEntry(facts({ entry, lifecycleAdmission: "ready", configurationRestarting: true }));
+  assert.equal(ready.room_agent_state?.connection.state, "connected");
+  // A stopped agent is not restarting.
+  const paused = projectRoomAgentManifestEntry(facts({ entry: { ...entry, desired_state: "paused" }, lifecycleAdmission: "unavailable", configurationRestarting: true }));
+  assert.notEqual(paused.room_agent_state?.inbox.detail, CONFIGURATION_RESTART_DETAIL);
 });
 
 test("rejects a stale binding and derives stale persisted liveness", () => {

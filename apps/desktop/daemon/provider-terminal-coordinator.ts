@@ -162,6 +162,8 @@ export class ProviderTerminalCoordinator {
   private readonly convergenceOwed = new Set<string>();
   /** Entries an owner's recovery has taken over from their exit's recording, until it ends. */
   private readonly recoveries = new Map<string, number>();
+  /** Entries whose runtime was replaced on purpose and whose new runtime has not yet taken over. */
+  private readonly configurationRestarts = new Set<string>();
   private readonly plannedConfigurationReplacements = new Map<
     ProviderInstallationToken,
     PlannedConfigurationReplacement
@@ -252,6 +254,20 @@ export class ProviderTerminalCoordinator {
         this.plannedConfigurationReplacements.delete(installation);
       }
     }
+  }
+
+  /**
+   * Whether the entry is stopping, or has just stopped, its runtime on
+   * purpose to apply its settings, and its new runtime has not yet taken over.
+   * The read model shows this as a restart, never as a failure to fix.
+   */
+  configurationRestarting(entry: { id: string; observed_state: string }): boolean {
+    if (this.configurationReplacementPlanned(entry.id)) return true;
+    if (!this.configurationRestarts.has(entry.id)) return false;
+    if (entry.observed_state === "starting" || entry.observed_state === "recovering") return true;
+    // The new runtime has taken over (or the agent stopped): the restart is over.
+    this.configurationRestarts.delete(entry.id);
+    return false;
   }
 
   /** Whether the entry's runtime is being stopped on purpose to apply its settings. */
@@ -772,6 +788,7 @@ export class ProviderTerminalCoordinator {
         last_terminal: payload,
       };
       if (commitFence && entry.observed_state === observedState && entry.condition === "none" && recorded) return;
+      if (plannedConfigurationReplacement) this.configurationRestarts.add(entryId);
       await this.ports.transitionOnce(
         entryId,
         observedState,
