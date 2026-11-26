@@ -14,6 +14,18 @@ export interface DesktopUpdateSidebarPresentation {
   state: "settings" | "downloading" | "ready" | "installing" | "error";
 }
 
+/** "signed " for a build that installs code-signed releases, else "". */
+function signedWord(status: DesktopUpdateStatus): string {
+  return status.releaseSigned ? "signed " : "";
+}
+
+/** The copy that tells a person what a restart to update does to running agents. */
+export function desktopUpdateAgentsNotice(status: DesktopUpdateStatus | null): string {
+  return status?.agentsSurviveInstall === false
+    ? "Running agents on this computer stop when LetAgents restarts to update. Start them again after the update."
+    : "Running agents stay open while LetAgents restarts. Agent controls pause briefly during the update.";
+}
+
 export function formatUpdateBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
@@ -54,7 +66,7 @@ export function desktopUpdateSidebarPresentation(
     const transfer = transferSizeDetail(status);
     const detail = transfer
       ? `${transfer}${rate ? ` · ${rate}/s` : ""}`
-      : "Preparing the signed download";
+      : `Preparing the ${signedWord(status)}download`;
     return {
       active: true,
       title: version ? `Downloading v${version}` : "Downloading update",
@@ -78,7 +90,7 @@ export function desktopUpdateSidebarPresentation(
     return {
       active: true,
       title: "Restarting to update",
-      detail: "Handing off running agents safely",
+      detail: status.agentsSurviveInstall === false ? "Stopping running agents" : "Handing off running agents safely",
       percent: 100,
       state: "installing",
     };
@@ -119,7 +131,7 @@ export function desktopUpdatePresentation(status: DesktopUpdateStatus | null): D
     case "checking":
       return {
         title: "Checking for updates",
-        detail: "Looking for a newer signed LetAgents release.",
+        detail: `Looking for a newer ${signedWord(status)}LetAgents release.`,
         tone: "neutral",
       };
     case "downloading":
@@ -163,7 +175,9 @@ export function desktopUpdatePresentation(status: DesktopUpdateStatus | null): D
     case "installing":
       return {
         title: "Preparing a safe restart",
-        detail: "Preparing to restart LetAgents while keeping your agents running.",
+        detail: status.agentsSurviveInstall === false
+          ? "Stopping running agents and restarting LetAgents to install the update."
+          : "Preparing to restart LetAgents while keeping your agents running.",
         tone: "warning",
       };
     case "error":
@@ -182,7 +196,7 @@ export function desktopUpdatePresentation(status: DesktopUpdateStatus | null): D
     default:
       return {
         title: "Automatic updates are ready",
-        detail: "LetAgents checks periodically and downloads signed releases in the background.",
+        detail: `LetAgents checks periodically and downloads ${signedWord(status)}releases in the background.`,
         tone: "neutral",
       };
   }

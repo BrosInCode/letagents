@@ -15,6 +15,11 @@
         <p>Desktop updates</p>
         <h2 role="status" aria-live="polite" aria-atomic="true">{{ presentation.title }}</h2>
         <span>{{ presentation.detail }}</span>
+        <span
+          v-if="confirmingInstall && updateStatus?.canInstall"
+          role="alert"
+          data-testid="install-desktop-update-agents-warning"
+        >{{ agentsNotice }}</span>
         <div
           v-if="updateStatus?.phase === 'downloading'"
           class="settings-update-progress"
@@ -33,9 +38,18 @@
           class="primary-button settings-action-button"
           type="button"
           data-testid="install-desktop-update"
-          @click="$emit('install')"
+          @click="requestInstall"
         >
-          Restart &amp; update
+          {{ confirmingInstall ? "Stop agents & update" : "Restart & update" }}
+        </button>
+        <button
+          v-if="confirmingInstall && updateStatus?.canInstall"
+          class="ghost-button settings-action-button"
+          type="button"
+          data-testid="cancel-desktop-update"
+          @click="confirmingInstall = false"
+        >
+          Cancel
         </button>
         <button
           v-if="updateStatus && updateStatus.phase !== 'unsupported'"
@@ -84,7 +98,9 @@
             class="state-pill"
             :data-state="updateStatus?.phase === 'unsupported' ? 'away' : 'connected'"
           >
-            {{ updateStatus?.phase === "unsupported" ? "development build" : "signed releases" }}
+            {{ updateStatus?.phase === "unsupported"
+              ? "development build"
+              : updateStatus?.releaseSigned ? "signed releases" : "unsigned releases" }}
           </span>
         </template>
       </SettingsRow>
@@ -93,8 +109,8 @@
         description="Checks at startup and every six hours. Updates download without interrupting your work."
       />
       <SettingsRow
-        title="Keep agents running"
-        description="Running agents stay open while LetAgents restarts. Agent controls pause briefly during the update."
+        :title="updateStatus?.agentsSurviveInstall === false ? 'Running agents' : 'Keep agents running'"
+        :description="agentsNotice"
       />
     </div>
 
@@ -106,10 +122,10 @@
 
 <script setup lang="ts">
 import { CircleCheck, Download, RefreshCw, Sparkles, TriangleAlert } from "@lucide/vue";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { desktopIpc } from "../../../../ipc/index.js";
 import type { DesktopAppInfo, DesktopUpdateStatus } from "../../../../../../electron/ipc-types";
-import { desktopUpdatePresentation } from "../../../../domain/desktop-update-status";
+import { desktopUpdateAgentsNotice, desktopUpdatePresentation } from "../../../../domain/desktop-update-status";
 import SettingsRow from "../SettingsRow.vue";
 
 const props = defineProps<{
@@ -117,12 +133,27 @@ const props = defineProps<{
   updateStatus: DesktopUpdateStatus | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   check: [];
   install: [];
 }>();
 
 const presentation = computed(() => desktopUpdatePresentation(props.updateStatus));
+const agentsNotice = computed(() => desktopUpdateAgentsNotice(props.updateStatus));
+// Where an update stops running agents (Windows), the first Restart click
+// says so and asks again before the app restarts.
+const confirmingInstall = ref(false);
+watch(() => props.updateStatus?.canInstall, (canInstall) => {
+  if (!canInstall) confirmingInstall.value = false;
+});
+function requestInstall(): void {
+  if (props.updateStatus?.agentsSurviveInstall === false && !confirmingInstall.value) {
+    confirmingInstall.value = true;
+    return;
+  }
+  confirmingInstall.value = false;
+  emit("install");
+}
 const restartFailed = computed(() => props.updateStatus?.failureStage === 'install' && Boolean(props.updateStatus.error));
 const maintenanceHeld = ref(false);
 const maintenanceReady = ref(false);

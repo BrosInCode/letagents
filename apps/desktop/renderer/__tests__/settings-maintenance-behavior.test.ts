@@ -5,7 +5,7 @@ import { parse, compileScript } from "@vue/compiler-sfc";
 import ts from "typescript";
 import * as Vue from "vue";
 import type { DesktopUpdateStatus } from "../../electron/ipc-types";
-import { desktopUpdatePresentation } from "../src/domain/desktop-update-status";
+import { desktopUpdateAgentsNotice, desktopUpdatePresentation } from "../src/domain/desktop-update-status";
 
 type Host = { children: Host[]; parent: Host | null; props: Record<string, any>; text: string };
 const node = (text = ""): Host => ({ children: [], parent: null, props: {}, text });
@@ -30,8 +30,11 @@ async function component(maintenance: { getStatus(): Promise<{ held: boolean; re
     vue: Vue,
     "@lucide/vue": Object.fromEntries(["CircleCheck", "Download", "RefreshCw", "Sparkles", "TriangleAlert"].map(name => [name, { render: () => null }])),
     "../../../../ipc/index.js": { desktopIpc: { maintenance } },
-    "../../../../domain/desktop-update-status": { desktopUpdatePresentation },
-    "../SettingsRow.vue": { default: { render: () => null } },
+    "../../../../domain/desktop-update-status": { desktopUpdateAgentsNotice, desktopUpdatePresentation },
+    "../SettingsRow.vue": { default: Vue.defineComponent({
+      props: { title: String, description: String },
+      setup: (rowProps, { slots }) => () => Vue.h("row", { title: rowProps.title, description: rowProps.description }, slots.action?.()),
+    }) },
   };
   const javascript = ts.transpileModule(compiled.content, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
     .replace(/import\s+\{([\s\S]*?)\}\s+from\s+["']([^"']+)["'];?/g, (_all, names: string, name: string) => {
@@ -50,7 +53,8 @@ function status(overrides: Partial<DesktopUpdateStatus> = {}): DesktopUpdateStat
     phase: "ready", currentVersion: "0.1.96", availableVersion: "0.1.97",
     releaseName: null, releaseNotes: null, updateSize: null, downloadProgress: null,
     lastCheckedAt: null, error: null, failureStage: null, downloadAttempt: null,
-    downloadAttemptLimit: null, unsupportedReason: null, canCheck: true, canInstall: true,
+    downloadAttemptLimit: null, unsupportedReason: null, releaseSigned: true, agentsSurviveInstall: true,
+    canCheck: true, canInstall: true,
     ...overrides,
   };
 }
@@ -142,4 +146,58 @@ test("a maintenance status read error alone does not offer force restart", async
   const app = renderer.createApp(pane, { appInfo: null, updateStatus: null }); app.mount(root);
   try { await flush(); assert.equal(find(root, "service-recovery"), undefined); }
   finally { app.unmount(); }
+});
+
+const text = (root: Host) => all(root).map(n => n.text).join(" ");
+const content = (n: Host | undefined): string => n ? [n.text, ...n.children.map(content)].join("") : "";
+const row = (root: Host, title: string) => all(root).find(n => n.props.title === title);
+
+test("a Windows update says running agents stop and asks again before it restarts", async () => {
+  const root = node(); const installs: string[] = [];
+  const pane = await component(undefined);
+  const props = Vue.reactive({
+    appInfo: { platform: "win32" },
+    updateStatus: status({ releaseSigned: false, agentsSurviveInstall: false }) as DesktopUpdateStatus,
+    onInstall: () => { installs.push("install"); },
+  });
+  const app = renderer.createApp({ render: () => Vue.h(pane, props) }); app.mount(root);
+  try {
+    await flush();
+    assert.match(row(root, "Running agents")?.props.description ?? "", /stop when LetAgents restarts/);
+    assert.equal(row(root, "Keep agents running"), undefined);
+    assert.match(text(root), /unsigned releases/);
+    assert.doesNotMatch(text(root), /(^|[^n])signed releases/);
+
+    const install = () => find(root, "install-desktop-update")!;
+    await install().props.onClick(); await flush();
+    assert.deepEqual(installs, [], "the first click only warns");
+    assert.match(content(find(root, "install-desktop-update-agents-warning")), /Running agents on this computer stop/);
+    assert.match(content(install()), /Stop agents & update/);
+
+    await find(root, "cancel-desktop-update")!.props.onClick(); await flush();
+    assert.equal(find(root, "install-desktop-update-agents-warning"), undefined);
+    assert.deepEqual(installs, []);
+
+    await install().props.onClick(); await flush();
+    await install().props.onClick(); await flush();
+    assert.deepEqual(installs, ["install"]);
+    assert.equal(find(root, "install-desktop-update-agents-warning"), undefined);
+  } finally { app.unmount(); }
+});
+
+test("a macOS update restarts at once and keeps the promise that agents stay open", async () => {
+  const root = node(); const installs: string[] = [];
+  const pane = await component(undefined);
+  const app = renderer.createApp(pane, {
+    appInfo: { platform: "darwin" }, updateStatus: status(), onInstall: () => { installs.push("install"); },
+  }); app.mount(root);
+  try {
+    await flush();
+    assert.match(row(root, "Keep agents running")?.props.description ?? "", /stay open/);
+    assert.match(text(root), /signed releases/);
+    assert.doesNotMatch(text(root), /unsigned/);
+    await find(root, "install-desktop-update")!.props.onClick(); await flush();
+    assert.deepEqual(installs, ["install"]);
+    assert.equal(find(root, "install-desktop-update-agents-warning"), undefined);
+  } finally { app.unmount(); }
 });

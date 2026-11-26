@@ -4,6 +4,7 @@ import test from "node:test";
 
 import type { DesktopUpdateStatus } from "../../electron/ipc-types";
 import {
+  desktopUpdateAgentsNotice,
   desktopUpdatePresentation,
   desktopUpdateSidebarPresentation,
   formatUpdateBytes,
@@ -24,6 +25,8 @@ function status(overrides: Partial<DesktopUpdateStatus> = {}): DesktopUpdateStat
     downloadAttempt: null,
     downloadAttemptLimit: null,
     unsupportedReason: null,
+    releaseSigned: true,
+    agentsSurviveInstall: true,
     canCheck: true,
     canInstall: false,
     ...overrides,
@@ -153,6 +156,24 @@ test("installing presentation describes the supervisor handoff", () => {
   const presentation = desktopUpdatePresentation(status({ phase: "installing", canCheck: false }));
   assert.match(presentation.title, /safe restart/i);
   assert.match(presentation.detail, /keeping your agents running/i);
+});
+
+test("update copy names signed releases only for a signed build", () => {
+  assert.match(desktopUpdatePresentation(status({ phase: "checking" })).detail, /newer signed LetAgents release/);
+  assert.match(desktopUpdatePresentation(status({ phase: "idle" })).detail, /downloads signed releases/);
+  const unsigned = status({ releaseSigned: false });
+  assert.doesNotMatch(desktopUpdatePresentation({ ...unsigned, phase: "checking" }).detail, /signed/);
+  assert.doesNotMatch(desktopUpdatePresentation({ ...unsigned, phase: "idle" }).detail, /signed/);
+  assert.equal(desktopUpdateSidebarPresentation({ ...unsigned, phase: "downloading" }).detail, "Preparing the download");
+});
+
+test("a Windows update says running agents stop instead of promising they stay open", () => {
+  const windows = status({ phase: "installing", canCheck: false, agentsSurviveInstall: false, releaseSigned: false });
+  assert.doesNotMatch(desktopUpdatePresentation(windows).detail, /keeping your agents running/);
+  assert.match(desktopUpdatePresentation(windows).detail, /Stopping running agents/);
+  assert.equal(desktopUpdateSidebarPresentation(windows).detail, "Stopping running agents");
+  assert.match(desktopUpdateAgentsNotice(windows), /stop when LetAgents restarts/);
+  assert.match(desktopUpdateAgentsNotice(status()), /stay open/);
 });
 
 test("update progress does not churn an atomic live region or claim account navigation state", async () => {
