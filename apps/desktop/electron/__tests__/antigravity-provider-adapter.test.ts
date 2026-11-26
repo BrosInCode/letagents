@@ -13,7 +13,7 @@ import { ownerAntigravityTokenFileExists, shareAntigravitySignIn } from "#provid
 import { antigravityPermissionTool } from "#provider-runtime/agents/antigravity/permissions.js";
 import { antigravityWorkspaceCommandCustomizations, antigravityWorkspaceRefusal } from "#provider-runtime/agents/antigravity/workspace-customizations.js";
 import { antigravityAuthorityFromPolicy, antigravityAuthorityForProfile, antigravityVersionAtLeast, isRoomServerToolCall, parseAntigravityVersion } from "#provider-runtime/agents/antigravity/launch.js";
-import { parseAntigravityModelsOutput } from "../main/agents/managed-agent-models.js";
+import { antigravityModelOptions } from "../main/agents/managed-agent-models.js";
 import { PROCESS_ENDED_DURING_TURN, ProviderContinuationMissingError, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStreamEvent } from "#provider-runtime/agents/provider-adapter.js";
 import { ProviderRuntimeBoundary } from "#provider-runtime/agents/provider-runtime-boundary.js";
 import type { ProviderProcessExit } from "#provider-runtime/agents/provider-evidence.js";
@@ -512,14 +512,13 @@ test("launch helpers: policy, version, room tool names and the model list", () =
   assert.equal(isRoomServerToolCall({ name: "mcp_letagents_ping", kind: "execute" }), false);
   assert.equal(isRoomServerToolCall({ name: "call_mcp_tool", rawInput: { ServerName: "letagents", ToolName: "x" } }), true);
   assert.equal(isRoomServerToolCall({ name: "mcp_other_get_board" }), false);
-  assert.deepEqual(parseAntigravityModelsOutput([
-    "Fetching available models...",
-    "gemini-4-neon-high\tGemini 4 Neon (High)", "gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)",
-    "gemini-4-neon-medium\tGemini 4 Neon (Medium)", "gemini-4-neon-low\tGemini 4 Neon (Low)",
-    "gemini-pro-orchestrator\tOrchestrator (Carbon)",
-    "claude-opus-5-5-low\tClaude Opus 5.5 (Low)", "claude-opus-5-5-high\tClaude Opus 5.5 (High)",
-    "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
-  ].join("\n")), [
+  assert.deepEqual(antigravityModelOptions([
+    ["gemini-4-neon-high", "Gemini 4 Neon (High)"], ["gemini-4-neon-xhigh", "Gemini 4 Neon (XHigh)"],
+    ["gemini-4-neon-medium", "Gemini 4 Neon (Medium)"], ["gemini-4-neon-low", "Gemini 4 Neon (Low)"],
+    ["gemini-pro-orchestrator", "Orchestrator (Carbon)"],
+    ["claude-opus-5-5-low", "Claude Opus 5.5 (Low)"], ["claude-opus-5-5-high", "Claude Opus 5.5 (High)"],
+    ["gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"],
+  ].map(([id, label]) => ({ id: id!, label: label! }))), [
     { id: "gemini-4-neon", label: "Gemini 4 Neon", source: "provider", supportedEfforts: ["low", "medium", "high", "xhigh"] },
     { id: "gemini-pro-orchestrator", label: "Orchestrator (Carbon)", source: "provider" },
     { id: "claude-opus-5-5", label: "Claude Opus 5.5", source: "provider", supportedEfforts: ["low", "high"] },

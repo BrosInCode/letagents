@@ -14,6 +14,7 @@ import type {
 import { claudeCodeVersionAtLeast, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "#provider-runtime/agents/claude-code-version.js";
 import { resolveCodexExecutable } from "#provider-runtime/agents/codex-executable.js";
 import { ANTIGRAVITY_EFFORTS, antigravityChildEnvironment, resolveAntigravityExecutable, splitAntigravityModelId } from "#provider-runtime/agents/antigravity/launch.js";
+import { AntigravityModelsSignInError, readAntigravityModelsOverAcp, type AntigravityModelRow } from "./antigravity-model-list.js";
 import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "#provider-runtime/agents/cursor-managed-profile.js";
 import { buildCursorChildEnv } from "#provider-runtime/agents/cursor-runner.js";
 import { resolveOpenModelEffortCatalog } from "#provider-runtime/agents/open-model-efforts.js";
@@ -472,59 +473,55 @@ export function openModelModelsResult(
   return modelResult("open-model", "ready", models, settings.model || null, null);
 }
 
+/** One read at a time per agy: two `agy acp` processes on one data folder would share its files. */
+const antigravityModelReads = new Map<string, Promise<DesktopAgentProviderModelsResult>>();
+
 /**
- * The models this Antigravity account offers, from `agy models`. Each id
- * carries its thinking level (`gemini-4-neon-high`), so there is no separate
- * effort. Without a choice the agent runs on Antigravity's own default.
+ * The models this Antigravity account offers, read over ACP (see
+ * `antigravity-model-list.ts`). Each id carries its thinking level
+ * (`gemini-4-neon-high`). Without a choice the agent runs on Antigravity's
+ * own default.
  */
 async function listAntigravityModels(
   input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopAgentProviderModelsResult> {
-  const runtimeEnv = antigravityChildEnvironment(desktopRuntimeEnvironment());
-  const command = resolveAntigravityExecutable(runtimeEnv);
+  const command = resolveAntigravityExecutable(antigravityChildEnvironment(desktopRuntimeEnvironment()));
   const cacheKey = `antigravity:${command}`;
   const forceRefresh = Boolean(input.refreshModels);
   const cached = modelListCache.get(cacheKey);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
     return cloneModelResult(cached.result);
   }
-  const result = await execFileWithTimeout(command, ["models"], { env: runtimeEnv });
-  const models = parseAntigravityModelsOutput(result.stdout);
-  const next = result.ok && models.length
-    ? modelResult("antigravity", "ready", models, null, null)
-    : modelResult(
-      "antigravity",
-      result.ok ? "unavailable" : "error",
-      [],
-      null,
-      firstNonEmptyLine(result.stderr) || result.error || "Antigravity did not return any models.",
-    );
-  if (!forceRefresh && next.status !== "ready" && cached?.result.status === "ready") {
-    return refreshStaleReadyModelCache(cacheKey, cached);
+  let reading = antigravityModelReads.get(cacheKey);
+  if (!reading) {
+    reading = readAntigravityModelResult(command).finally(() => antigravityModelReads.delete(cacheKey));
+    antigravityModelReads.set(cacheKey, reading);
+  }
+  const next = await reading;
+  const current = modelListCache.get(cacheKey);
+  if (!forceRefresh && next.status !== "ready" && current?.result.status === "ready") {
+    return refreshStaleReadyModelCache(cacheKey, current);
   }
   cacheModelListResult(cacheKey, next);
   return cloneModelResult(next);
 }
 
+async function readAntigravityModelResult(command: string): Promise<DesktopAgentProviderModelsResult> {
+  try {
+    return modelResult("antigravity", "ready", antigravityModelOptions(await readAntigravityModelsOverAcp(command)), null, null);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return modelResult("antigravity", error instanceof AntigravityModelsSignInError ? "unavailable" : "error", [], null, message);
+  }
+}
+
 /**
- * `agy models` prints one `<id>\t<name>` line per model and thinking level
- * (`gemini-4-neon-high\tGemini 4 Neon (High)`). They are grouped into one
+ * agy lists one entry per model and thinking level
+ * (`gemini-4-neon-high`, "Gemini 4 Neon (High)"). They are grouped into one
  * option per model, which lists its levels as efforts. A model offered at a
  * single level keeps its own id and has no effort setting.
  */
-export function parseAntigravityModelsOutput(output: string): DesktopAgentProviderModelOption[] {
-  const rows: Array<{ id: string; label: string }> = [];
-  const seen = new Set<string>();
-  for (const rawLine of output.split(/\r?\n/)) {
-    const line = rawLine.replace(/\u001b\[[0-?]*[ -\/]*[@-~]/g, "").trim();
-    const match = /^([a-z0-9][a-z0-9._-]*)\t+(.+)$/i.exec(line) ?? /^([a-z0-9][a-z0-9._-]*)\s{2,}(.+)$/i.exec(line);
-    if (!match) continue;
-    const id = match[1]!.trim();
-    const label = match[2]!.trim();
-    if (!id || !label || seen.has(id)) continue;
-    seen.add(id);
-    rows.push({ id, label });
-  }
+export function antigravityModelOptions(rows: readonly AntigravityModelRow[]): DesktopAgentProviderModelOption[] {
   const families = new Map<string, { label: string; efforts: DesktopManagedAgentEffort[]; ids: string[] }>();
   for (const row of rows) {
     const { family, effort } = splitAntigravityModelId(row.id);

@@ -123,11 +123,22 @@ export class RuntimeConfigurationApplyCoordinator {
   private readonly recordBlocks = new WeakMap<ProviderInstallationToken, { sinceMs: number; tries: number }>();
   /** Entries whose runtime was restarted to get past a blocked record, until a runtime of theirs is admitted again. */
   private readonly recordRestarts = new Set<string>();
+  /** Entries whose settings apply has taken delivery over and has not ended. */
+  private readonly applyingEntries = new Set<string>();
   /** Why a blocked record now waits for the agent's owner, for the runtime it was decided for. */
   private readonly recordAttention = new Map<string, { installation: ProviderInstallationToken; detail: string }>();
   private recordBlockGraceMs = RECORD_BLOCK_GRACE_MS;
   private recordRestartPendingLimitMs = RECORD_RESTART_PENDING_LIMIT_MS;
   constructor(private readonly options: RuntimeConfigurationApplyCoordinatorOptions) {}
+
+  /**
+   * Whether a settings apply for the entry has taken delivery over and has not
+   * ended. It covers the time before the planned replacement is registered;
+   * afterwards the terminal coordinator's planned and grace rule applies.
+   */
+  applyingConfiguration(entryId: string): boolean {
+    return this.applyingEntries.has(entryId);
+  }
 
   /**
    * An agent that is running and idle takes no messages while its execution
@@ -452,6 +463,9 @@ export class RuntimeConfigurationApplyCoordinator {
         if (!approvalReservation) return { outcome: "busy_active_turn" };
       }
       this.options.entryConcurrency.bumpControlEpoch(input.entryId);
+      // Taking delivery over stops the room ingress. Until the planned
+      // replacement is registered, the read model shows that as a restart.
+      this.applyingEntries.add(input.entryId);
       releaseDelivery = await this.options.delivery.reserveIdle(input.entryId);
       if (!releaseDelivery) {
         return { outcome: "busy_active_turn" };
@@ -498,6 +512,7 @@ export class RuntimeConfigurationApplyCoordinator {
       if (managed && (error as { code?: unknown })?.code === "MANAGED_RUNTIME_REFRESH_DEFERRED") return { outcome: "conflict" };
       throw error;
     } finally {
+      this.applyingEntries.delete(input.entryId);
       approvalReservation?.release();
       releaseDelivery?.();
       release();
