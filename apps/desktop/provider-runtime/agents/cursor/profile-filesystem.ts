@@ -23,6 +23,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { rm } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { openNoFollowSync, ownerPrivatePlatform, protectOwnerPrivateSync, writePrivateFileAtomicallySync } from "../../../../../shared/owner-private-fs.mjs";
 import { getLetAgentsLocalStatePath } from "../../paths.js";
@@ -289,18 +290,43 @@ export function writePrivateFileAtomic(destination: string, data: string | Buffe
   }
 }
 
-export function linkDarwinLoginKeychains(sourceHomeDir: string, homeDir: string): void {
+/**
+ * The login keychain folder under a source home. A real directory is used as it
+ * is. One symlink is also allowed, because the LetAgents Preview makes its
+ * isolated home's Library/Keychains point at the account's own folder; it must
+ * resolve to a real directory that is exactly the account's real Keychains.
+ */
+function resolveDarwinLoginKeychainSource(sourceHomeDir: string, accountHomeDir: string): { linkTarget: string; readRoot: string } | undefined {
+  const source = join(sourceHomeDir, "Library", "Keychains");
+  if (!existsSync(source)) return undefined;
+  const sourceStat = lstatSync(source);
+  if (sourceStat.isDirectory() && !sourceStat.isSymbolicLink()) {
+    return { linkTarget: source, readRoot: realpathSync(source) };
+  }
+  const refusal = new Error("Cursor login keychain source must be a real directory.");
+  if (!sourceStat.isSymbolicLink()) throw refusal;
+  let resolved: string;
+  let accountKeychains: string;
+  try {
+    resolved = realpathSync(source);
+    accountKeychains = realpathSync(join(accountHomeDir, "Library", "Keychains"));
+  } catch {
+    throw refusal;
+  }
+  const resolvedStat = lstatSync(resolved);
+  if (!resolvedStat.isDirectory() || resolvedStat.isSymbolicLink() || resolved !== accountKeychains) throw refusal;
+  return { linkTarget: resolved, readRoot: resolved };
+}
+
+export function linkDarwinLoginKeychains(sourceHomeDir: string, homeDir: string, accountHomeDir: string = userInfo().homedir): void {
   if (process.platform !== "darwin") {
     return;
   }
-  const source = join(sourceHomeDir, "Library", "Keychains");
-  if (!existsSync(source)) {
+  const resolvedSource = resolveDarwinLoginKeychainSource(sourceHomeDir, accountHomeDir);
+  if (!resolvedSource) {
     return;
   }
-  const sourceStat = lstatSync(source);
-  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) {
-    throw new Error("Cursor login keychain source must be a real directory.");
-  }
+  const source = resolvedSource.linkTarget;
   const link = join(homeDir, "Library", "Keychains");
   ensurePrivateDirectory(dirname(link));
   if (existsSync(link)) {
@@ -351,15 +377,10 @@ function windowsCursorLoginPath(homeDir: string): string {
   return join(homeDir, "AppData", "Roaming", "Cursor", "auth.json");
 }
 
-export function darwinLoginKeychainReadRoots(sourceHomeDir: string): string[] {
+export function darwinLoginKeychainReadRoots(sourceHomeDir: string, accountHomeDir: string = userInfo().homedir): string[] {
   if (process.platform !== "darwin") return [];
-  const source = join(sourceHomeDir, "Library", "Keychains");
-  if (!existsSync(source)) return [];
-  const stat = lstatSync(source);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error("Cursor login keychain source must be a real directory.");
-  }
-  return [realpathSync(source)];
+  const resolvedSource = resolveDarwinLoginKeychainSource(sourceHomeDir, accountHomeDir);
+  return resolvedSource ? [resolvedSource.readRoot] : [];
 }
 
 export function ensurePrivateProfileTree(profileRoot: string, directories: string[]): void {
