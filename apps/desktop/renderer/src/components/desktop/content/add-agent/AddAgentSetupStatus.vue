@@ -83,7 +83,17 @@
       class="desktop-add-agent-auth-command"
       aria-label="Agent sign-in command"
     >
-      <span>Sign-in command</span>
+      <div class="desktop-add-agent-auth-command-header">
+        <span>Sign-in command</span>
+        <button
+          type="button"
+          class="desktop-add-agent-auth-copy"
+          :disabled="copyingAuthCommand"
+          @click="emit('copy-auth-command')"
+        >
+          {{ copyingAuthCommand ? "Copying..." : "Copy sign-in command" }}
+        </button>
+      </div>
       <code>{{ authCommand }}</code>
     </section>
 
@@ -127,6 +137,7 @@ const props = defineProps<{
   worktrees: RepoWorktreeEntry[];
   worktreeDescription: string;
   authCommand: string | null;
+  copyingAuthCommand?: boolean;
   installCommand: string | null;
   error: string | null;
 }>();
@@ -135,6 +146,7 @@ const needsAttention = computed(() => Boolean(
 ));
 const emit = defineEmits<{
   refresh: [];
+  "copy-auth-command": [];
   "choose-worktree": [path: string];
   "open-secure-storage": [];
 }>();
