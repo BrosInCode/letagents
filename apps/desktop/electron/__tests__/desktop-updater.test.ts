@@ -8,7 +8,9 @@ import { HttpError } from "builder-util-runtime";
 import {
   DesktopUpdaterController,
   desktopUpdateFeedBaseUrl,
+  isNewerReleaseVersion,
   isRetryableUpdateTransportError,
+  updaterConfigNamesPublisher,
   versionFromReleaseName,
 } from "../main/desktop-updater.js";
 import { DesktopUpdateDiagnosticLog } from "../main/update-diagnostics.js";
@@ -52,6 +54,8 @@ test("desktop updater exposes a truthful unsupported state without touching the 
     downloadAttempt: null,
     downloadAttemptLimit: null,
     unsupportedReason: "Production builds only.",
+    releaseSigned: false,
+    agentsSurviveInstall: true,
     canCheck: false,
     canInstall: false,
   });
@@ -254,9 +258,134 @@ test("desktop updater tracks background download and release metadata", async ()
     downloadAttempt: null,
     downloadAttemptLimit: null,
     unsupportedReason: null,
-    canCheck: false,
+    releaseSigned: false,
+    agentsSurviveInstall: true,
+    // A downloaded update still lets the person check for a newer one.
+    canCheck: true,
     canInstall: true,
   });
+});
+
+test("desktop updater reports the build's signing and whether agents survive an update", () => {
+  const signed = controller({ releaseSigned: true }).updater.getStatus();
+  assert.equal(signed.releaseSigned, true);
+  assert.equal(signed.agentsSurviveInstall, true);
+  const windows = controller({ releaseSigned: false, agentsSurviveInstall: false }).updater.getStatus();
+  assert.equal(windows.releaseSigned, false);
+  assert.equal(windows.agentsSurviveInstall, false);
+  // An unsupported build installs no releases, signed or not.
+  assert.equal(controller({ supported: false, releaseSigned: true }).updater.getStatus().releaseSigned, false);
+});
+
+test("a ready update keeps checking the feed and stages a newer release", async () => {
+  let feedVersion = "0.2.0";
+  const { updater, events } = controller({
+    checkForUpdates: async () => {
+      events.push(`check ${feedVersion}`);
+      return { isUpdateAvailable: true, version: feedVersion, releaseName: `LetAgents ${feedVersion}` };
+    },
+    downloadUpdate: async () => {
+      events.push(`download ${feedVersion}`);
+      updater.markDownloaded({ releaseName: `LetAgents ${feedVersion}` });
+    },
+  });
+  const first = await updater.check();
+  assert.equal(first.phase, "ready");
+  assert.equal(first.availableVersion, "0.2.0");
+  assert.equal(first.canCheck, true);
+
+  feedVersion = "0.3.0";
+  const second = await updater.check();
+  assert.deepEqual(events, ["check 0.2.0", "download 0.2.0", "check 0.3.0", "download 0.3.0"]);
+  assert.equal(second.phase, "ready");
+  assert.equal(second.availableVersion, "0.3.0");
+  assert.equal(second.releaseName, "LetAgents 0.3.0");
+  assert.equal(second.canInstall, true);
+  assert.equal(second.canCheck, true);
+});
+
+test("a ready update is kept when the feed has no newer release or cannot be read", async () => {
+  let feed: () => Promise<{ isUpdateAvailable: boolean; version?: string }> = async () => ({ isUpdateAvailable: true, version: "0.2.0" });
+  const { updater, events } = controller({
+    checkForUpdates: async () => { events.push("check"); return feed(); },
+    downloadUpdate: async () => { events.push("download"); },
+  });
+  await updater.check();
+  assert.equal(updater.getStatus().phase, "ready");
+  assert.deepEqual(events, ["check", "download"]);
+
+  // The same release again: nothing is downloaded twice.
+  const same = await updater.check();
+  assert.deepEqual(events, ["check", "download", "check"]);
+  assert.equal(same.phase, "ready");
+  assert.equal(same.availableVersion, "0.2.0");
+
+  // An older release (a rolled-back feed) never replaces a newer download.
+  feed = async () => ({ isUpdateAvailable: true, version: "0.1.5" });
+  const older = await updater.check();
+  assert.deepEqual(events, ["check", "download", "check", "check"]);
+  assert.equal(older.availableVersion, "0.2.0");
+
+  // A failed check leaves the downloaded update ready to install, without an error.
+  feed = async () => { throw new Error("missing latest-mac.yml"); };
+  const failed = await updater.check();
+  assert.equal(failed.phase, "ready");
+  assert.equal(failed.error, null);
+  assert.equal(failed.canInstall, true);
+  assert.equal(failed.canCheck, true);
+  assert.equal(failed.availableVersion, "0.2.0");
+});
+
+test("a ready update stays installable while the feed is checked again", async () => {
+  let answer!: (result: { isUpdateAvailable: boolean; version: string }) => void;
+  let checks = 0;
+  const { updater, events } = controller({
+    checkForUpdates: async () => {
+      checks += 1;
+      if (checks === 1) return { isUpdateAvailable: true, version: "0.2.0" };
+      return new Promise((resolve) => { answer = resolve; });
+    },
+    downloadUpdate: async () => { events.push("download"); },
+  });
+  await updater.check();
+  const rechecking = updater.check();
+  await new Promise((resolve) => setImmediate(resolve));
+  const during = updater.getStatus();
+  assert.equal(during.phase, "ready");
+  assert.equal(during.canInstall, true);
+  assert.equal(during.canCheck, false);
+
+  // The person restarts before the feed answers: the newer release is not fetched.
+  const installing = await updater.install();
+  assert.equal(installing.phase, "installing");
+  answer({ isUpdateAvailable: true, version: "0.3.0" });
+  const after = await rechecking;
+  assert.equal(after.phase, "installing");
+  assert.deepEqual(events, ["download", "handoff", "install"]);
+});
+
+test("a Windows build counts as signed only when its updater config names a publisher", () => {
+  // The config package-artifact.mjs writes today (createDesktopUpdaterConfig): unsigned.
+  const unsigned = {
+    provider: "generic",
+    url: "https://downloads.letagents.chat/desktop/feeds/win32-x64/",
+    updaterCacheDirName: "letagents-desktop-updater",
+  };
+  assert.equal(updaterConfigNamesPublisher(`${JSON.stringify(unsigned, null, 2)}\n`), false);
+  assert.equal(updaterConfigNamesPublisher(JSON.stringify({ provider: "generic", publisherName: ["LetAgents"] }, null, 2)), true);
+  assert.equal(updaterConfigNamesPublisher(JSON.stringify({ provider: "generic", publisherName: ["LetAgents"] })), true);
+  assert.equal(updaterConfigNamesPublisher("provider: generic\npublisherName:\n  - LetAgents\n"), true);
+  assert.equal(updaterConfigNamesPublisher("provider: generic\n# publisherName: none yet\n"), false);
+});
+
+test("release version comparison stages only a strictly newer release", () => {
+  assert.equal(isNewerReleaseVersion("0.1.143", "0.1.142"), true);
+  assert.equal(isNewerReleaseVersion("0.2.0", "0.1.999"), true);
+  assert.equal(isNewerReleaseVersion("1.0.0", "0.9.9"), true);
+  assert.equal(isNewerReleaseVersion("0.1.142", "0.1.142"), false);
+  assert.equal(isNewerReleaseVersion("0.1.141", "0.1.142"), false);
+  assert.equal(isNewerReleaseVersion("v0.1.143", "0.1.142"), true);
+  assert.equal(isNewerReleaseVersion("0.1.143", null), true);
 });
 
 test("desktop updater proves daemon handoff before invoking Squirrel installation", async () => {
