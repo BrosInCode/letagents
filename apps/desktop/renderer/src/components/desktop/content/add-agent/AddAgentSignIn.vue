@@ -18,7 +18,7 @@
         class="desktop-add-agent-sign-in-link"
         :title="update.url"
         @click="controller.openLink()"
-      >{{ update.url }}</button>
+      >Open {{ linkLabel }}</button>
       <div v-if="update.code" class="desktop-add-agent-sign-in-code">
         <code aria-label="One-time code">{{ update.code }}</code>
         <button type="button" class="desktop-add-agent-sign-in-quiet" @click="controller.copyCode()">
@@ -71,6 +71,16 @@ const heading = computed(() => {
   if (state === "starting") return "Starting sign-in...";
   if (state === "verifying") return "Checking the sign-in...";
   return update.value?.inTerminal ? "Finish in Terminal" : "Finish in your browser";
+});
+/** The sign-in page as a short label: a device page keeps its path, a long OAuth link shows its host. */
+const linkLabel = computed(() => {
+  try {
+    const url = new URL(update.value?.url ?? "");
+    const path = url.pathname.replace(/\/$/, "");
+    return !url.search && path.length <= 24 ? `${url.host}${path}` : url.host;
+  } catch {
+    return "the sign-in page";
+  }
 });
 const description = computed(() => {
   if (update.value?.state === "starting") return "Waiting for the sign-in page.";
