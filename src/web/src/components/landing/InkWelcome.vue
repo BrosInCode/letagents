@@ -39,7 +39,7 @@
               <svg v-else viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8" /><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
             </span>
             <span class="download-text">
-              <span class="download-name">{{ link.name }}<small v-if="link.detail">{{ link.detail }}</small></span>
+              <span class="download-name">{{ link.name }}</span>
             </span>
             <span class="download-arrow" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M12 4v13m0 0-5.5-5.5M12 17l5.5-5.5M5 20.5h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
@@ -69,8 +69,8 @@ const visitorPlatform = detectDesktopVisitorPlatform(typeof navigator === 'undef
 const downloadLinks = computed(() => {
   const offer = desktopDownloadOffer(macDesktopBeta.value, visitorPlatform)
   return [offer.primary, ...offer.others].map((link) => {
-    const [name, detail] = link.label.split(' · ')
-    return { ...link, name, detail }
+    // The visible name is short ("Mac"); the full label stays in the link's accessible name.
+    return { ...link, name: link.label.split(' · ')[0] }
   })
 })
 
@@ -358,7 +358,6 @@ onUnmounted(() => {
 .download-icon :deep(svg), .download-icon > svg { width: 28px; height: 28px; }
 .download-text { display: grid; gap: 6px; flex: 1 1 auto; }
 .download-name { font: 650 21px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.025em; white-space: nowrap; }
-.download-name small { margin-left: 8px; font-size: 13.5px; font-weight: 500; letter-spacing: -.01em; opacity: .5; }
 .download-arrow {
   display: grid; place-items: center; flex: 0 0 38px; width: 38px; height: 38px; border-radius: 50%;
   box-shadow: inset 0 0 0 1px rgba(239, 238, 230, .16);
@@ -405,6 +404,5 @@ onUnmounted(() => {
   .download-icon :deep(svg), .download-icon > svg { width: 22px; height: 22px; }
   .download-name { font-size: 16px; }
   .download[data-primary="true"] .download-name { font-size: 19px; }
-  .download-name small { font-size: 12px; }
 }
 </style>
