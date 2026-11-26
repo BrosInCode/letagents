@@ -91,6 +91,10 @@ let liveFrame = 0
 let liveRunning = false
 let startedAt = 0
 let observer: ResizeObserver | undefined
+// The grids are sized to the canvas shape when the scene is made. A later change of shape
+// would stretch the ink (a wider window makes a fat mark), so the scene is made again.
+let sceneShape = 0
+let rebuildTimer: ReturnType<typeof setTimeout> | undefined
 
 function elapsed() { return scene && startedAt ? Math.min((performance.now() - startedAt) / 1000, scene.end) : 0 }
 function openingDone() { return Boolean(scene && startedAt && (performance.now() - startedAt) / 1000 >= scene.end) }
@@ -126,21 +130,60 @@ async function play() {
   scene = null
   runId.value++
   await nextTick()
-  const mark = placeMark()
   const canvas = sceneCanvas.value
   if (!canvas) return
-  try {
-    const light = matchMedia('(max-width: 760px), (pointer: coarse)').matches
-    scene = createInkScene(canvas, { light, markCenter: mark.center, markHeight: mark.height })
-  } catch (error) {
-    console.error(error)
-  }
+  scene = build(canvas)
   if (!scene) { fallback.value = true; return }
   canvas.addEventListener('webglcontextlost', onContextLost, { once: true })
   observer?.observe(canvas)
   startedAt = 0
   if (reduced) { scene.render(scene.end); return }
   frame = requestAnimationFrame(tick)
+}
+
+function canvasShape(canvas: HTMLCanvasElement) {
+  const box = canvas.getBoundingClientRect()
+  return box.height ? box.width / box.height : 0
+}
+
+function build(canvas: HTMLCanvasElement): InkScene | null {
+  const mark = placeMark()
+  let made: InkScene | null = null
+  try {
+    const light = matchMedia('(max-width: 760px), (pointer: coarse)').matches
+    made = createInkScene(canvas, { light, markCenter: mark.center, markHeight: mark.height })
+  } catch (error) {
+    console.error(error)
+  }
+  sceneShape = canvasShape(canvas)
+  return made
+}
+
+// Make the scene again for the new shape, at the same moment: the fixed time step
+// draws the same picture for the same time, so the opening carries on where it was.
+function rebuild() {
+  const canvas = sceneCanvas.value
+  if (!scene || !canvas) return
+  const t = reduced ? scene.end : startedAt ? Math.min((performance.now() - startedAt) / 1000, scene.end) : 0
+  cancelAnimationFrame(liveFrame)
+  liveRunning = false
+  scene.dispose()
+  scene = null
+  const made = build(canvas)
+  scene = made
+  if (!made) { cancelAnimationFrame(frame); fallback.value = true; return }
+  made.render(t)
+}
+
+function onResize() {
+  const canvas = sceneCanvas.value
+  if (!scene || !canvas) return
+  scene.resize()
+  if (startedAt || reduced) scene.render(reduced ? scene.end : elapsed())
+  const shape = canvasShape(canvas)
+  if (!shape || !sceneShape || Math.abs(shape / sceneShape - 1) < .02) return
+  clearTimeout(rebuildTimer)
+  rebuildTimer = setTimeout(rebuild, 180)
 }
 
 function onContextLost(event: Event) {
@@ -226,15 +269,12 @@ onMounted(() => {
     .catch(() => { /* Keep the bundled fallback. */ })
   reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
   makeGrain()
-  observer = new ResizeObserver(() => {
-    if (!scene) return
-    scene.resize()
-    if (startedAt) scene.render(elapsed())
-  })
+  observer = new ResizeObserver(onResize)
   void play()
 })
 
 onUnmounted(() => {
+  clearTimeout(rebuildTimer)
   cancelAnimationFrame(frame)
   cancelAnimationFrame(liveFrame)
   observer?.disconnect()
