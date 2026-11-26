@@ -42,6 +42,20 @@ function parseWindowsArchitecture(raw: string): WindowsDesktopArchitecture | und
   return raw === "x64" ? raw : undefined;
 }
 
+const WINDOWS_INSTALLER_LABEL = "Windows x64";
+
+/**
+ * The installers of a loaded release that failed their proof, by label, with
+ * the reason. Each download route serves only its own installer, so one
+ * missing checksum file takes only that installer's route offline.
+ */
+const unprovenInstallers = new WeakMap<MacDesktopPublicReleaseManifest, ReadonlyMap<string, string>>();
+
+/** Why the installer `label` ("arm64", "x64" or "Windows x64") of `release` failed its proof, or null when it passed. */
+export function unprovenDesktopInstallerReason(release: MacDesktopPublicReleaseManifest, label: string): string | null {
+  return unprovenInstallers.get(release)?.get(label) ?? null;
+}
+
 /** Every installer a release lists: both macOS DMGs and, from the first Windows release on, the Windows installer. */
 function releaseInstallers(release: MacDesktopPublicReleaseManifest): Array<{ label: string; asset: DesktopPublicReleaseAsset }> {
   return [
@@ -49,7 +63,7 @@ function releaseInstallers(release: MacDesktopPublicReleaseManifest): Array<{ la
       label: architecture,
       asset: release.assets[architecture],
     })),
-    ...(release.windows ? [{ label: "Windows x64", asset: release.windows.x64 }] : []),
+    ...(release.windows ? [{ label: WINDOWS_INSTALLER_LABEL, asset: release.windows.x64 }] : []),
   ];
 }
 
@@ -76,46 +90,73 @@ async function readBoundedBody(response: Response, maxBytes: number, label: stri
   return Buffer.concat(chunks, bytes).toString("utf8");
 }
 
+/**
+ * Proves each installer the release lists: an immutable object of the
+ * manifest's size, and an immutable checksum file that names the manifest's
+ * SHA-256. Each installer is proved on its own. The release is accepted (and
+ * may advance the durable high-water) when at least one installer is proved;
+ * the others are recorded, and their routes stay closed. It fails when no
+ * installer is proved, so an unproven manifest cannot advance the high-water.
+ */
 export async function verifyMacDesktopReleaseArtifacts(
   release: MacDesktopPublicReleaseManifest,
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
-  await Promise.all(releaseInstallers(release).map(async ({ label: architecture, asset }) => {
-    const assetResponse = await fetcher(asset.publicUrl, {
-      method: "HEAD",
-      redirect: "error",
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!assetResponse.ok) {
-      throw new Error(`${architecture} desktop release asset returned HTTP ${assetResponse.status}.`);
-    }
-    if (Number(assetResponse.headers.get("content-length")) !== asset.bytes) {
-      throw new Error(`${architecture} desktop release asset byte size does not match its manifest.`);
-    }
-    if (!/\bimmutable\b/.test(assetResponse.headers.get("cache-control") ?? "")) {
-      throw new Error(`${architecture} desktop release asset is not published immutably.`);
-    }
+  const installers = releaseInstallers(release);
+  const results = await Promise.allSettled(installers.map(({ label, asset }) => verifyInstaller(label, asset, fetcher)));
+  const failures = new Map<string, string>();
+  let firstError: unknown = null;
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") return;
+    firstError ??= result.reason;
+    failures.set(installers[index]!.label, result.reason instanceof Error ? result.reason.message : String(result.reason));
+  });
+  if (failures.size === installers.length) throw firstError;
+  if (failures.size > 0) {
+    unprovenInstallers.set(release, failures);
+    console.warn(`[desktop-download] v${release.version}: serving only proved installers. ${[...failures.values()].join(" ")}`);
+  }
+}
 
-    const sidecarResponse = await fetcher(`${asset.publicUrl}.sha256`, {
-      headers: { Accept: "text/plain" },
-      redirect: "error",
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!sidecarResponse.ok) {
-      throw new Error(`${architecture} desktop release checksum proof returned HTTP ${sidecarResponse.status}.`);
-    }
-    if (!/\bimmutable\b/.test(sidecarResponse.headers.get("cache-control") ?? "")) {
-      throw new Error(`${architecture} desktop release checksum proof is not published immutably.`);
-    }
-    const proof = (await readBoundedBody(
-      sidecarResponse,
-      CHECKSUM_SIDECAR_MAX_BYTES,
-      `${architecture} desktop release checksum proof`,
-    )).trimEnd();
-    if (proof !== `${asset.sha256}  ${asset.fileName}`) {
-      throw new Error(`${architecture} desktop release checksum proof does not match its manifest.`);
-    }
-  }));
+async function verifyInstaller(
+  architecture: string,
+  asset: DesktopPublicReleaseAsset,
+  fetcher: typeof fetch,
+): Promise<void> {
+  const assetResponse = await fetcher(asset.publicUrl, {
+    method: "HEAD",
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!assetResponse.ok) {
+    throw new Error(`${architecture} desktop release asset returned HTTP ${assetResponse.status}.`);
+  }
+  if (Number(assetResponse.headers.get("content-length")) !== asset.bytes) {
+    throw new Error(`${architecture} desktop release asset byte size does not match its manifest.`);
+  }
+  if (!/\bimmutable\b/.test(assetResponse.headers.get("cache-control") ?? "")) {
+    throw new Error(`${architecture} desktop release asset is not published immutably.`);
+  }
+
+  const sidecarResponse = await fetcher(`${asset.publicUrl}.sha256`, {
+    headers: { Accept: "text/plain" },
+    redirect: "error",
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!sidecarResponse.ok) {
+    throw new Error(`${architecture} desktop release checksum proof returned HTTP ${sidecarResponse.status}.`);
+  }
+  if (!/\bimmutable\b/.test(sidecarResponse.headers.get("cache-control") ?? "")) {
+    throw new Error(`${architecture} desktop release checksum proof is not published immutably.`);
+  }
+  const proof = (await readBoundedBody(
+    sidecarResponse,
+    CHECKSUM_SIDECAR_MAX_BYTES,
+    `${architecture} desktop release checksum proof`,
+  )).trimEnd();
+  if (proof !== `${asset.sha256}  ${asset.fileName}`) {
+    throw new Error(`${architecture} desktop release checksum proof does not match its manifest.`);
+  }
 }
 
 export function createDesktopReleaseManifestLoader(options: {
@@ -214,9 +255,10 @@ export function registerDesktopDownloadRoutes(
   app.get("/downloads/mac/current.json", async (_req, res) => {
     try {
       const release = await loadCurrentRelease();
+      // A Windows installer that failed its proof is not offered.
       res
         .set("Cache-Control", "public, max-age=30, must-revalidate")
-        .json(release);
+        .json(unprovenDesktopInstallerReason(release, WINDOWS_INSTALLER_LABEL) ? { ...release, windows: null } : release);
     } catch {
       res.status(503).set("Cache-Control", "no-store").send("Current Mac beta release is temporarily unavailable.");
     }
@@ -240,7 +282,10 @@ export function registerDesktopDownloadRoutes(
 
     let publicUrl: string;
     try {
-      publicUrl = (await loadCurrentRelease()).assets[architecture].publicUrl;
+      const release = await loadCurrentRelease();
+      const unproven = unprovenDesktopInstallerReason(release, architecture);
+      if (unproven) throw new Error(unproven);
+      publicUrl = release.assets[architecture].publicUrl;
     } catch {
       // A bundled fallback is safe only while the durable release high-water has
       // not moved past it. Fail closed after a newer release or DB uncertainty.
@@ -275,6 +320,10 @@ export function registerDesktopDownloadRoutes(
     }
     if (!release.windows) {
       res.status(404).set("Cache-Control", "public, max-age=60, must-revalidate").send("Windows beta build not found.");
+      return;
+    }
+    if (unprovenDesktopInstallerReason(release, WINDOWS_INSTALLER_LABEL)) {
+      res.status(503).set("Cache-Control", "no-store").send("Current Windows beta release is temporarily unavailable.");
       return;
     }
     res

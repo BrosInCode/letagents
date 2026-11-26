@@ -7,6 +7,7 @@ import express from "express";
 import {
   createDesktopReleaseManifestLoader,
   registerDesktopDownloadRoutes,
+  unprovenDesktopInstallerReason,
   verifyMacDesktopReleaseArtifacts,
 } from "../releases/desktop-download.js";
 import {
@@ -505,10 +506,89 @@ test("artifact proof covers the Windows installer and its checksum sidecar", asy
   assert.ok(requested.includes(`HEAD ${windowsRelease.windows.x64.publicUrl}`));
   assert.ok(requested.includes(`GET ${windowsRelease.windows.x64.publicUrl}.sha256`));
 
-  await assert.rejects(
-    verifyMacDesktopReleaseArtifacts(windowsRelease, async (input, init) => String(input).includes("win32")
-      ? new Response("Not found", { status: 404 })
-      : fetcher(input, init)),
-    /Windows x64 desktop release asset returned HTTP 404/,
-  );
+  // A failed Windows proof does not reject the release: the Mac installers
+  // were proved, and only the Windows installer is recorded as unproven.
+  const partial = JSON.parse(JSON.stringify(windowsRelease)) as typeof windowsRelease;
+  await verifyMacDesktopReleaseArtifacts(partial, async (input, init) => String(input).includes("win32")
+    ? new Response("Not found", { status: 404 })
+    : fetcher(input, init));
+  assert.match(unprovenDesktopInstallerReason(partial, "Windows x64") ?? "", /Windows x64 desktop release asset returned HTTP 404/);
+  assert.equal(unprovenDesktopInstallerReason(partial, "arm64"), null);
+  assert.equal(unprovenDesktopInstallerReason(windowsRelease, "Windows x64"), null);
+});
+
+test("one installer's failed checksum proof takes only its own download offline", async (t) => {
+  const release = JSON.parse(JSON.stringify(windowsRelease)) as typeof windowsRelease;
+  const installers = [release.assets.arm64, release.assets.x64, release.windows.x64];
+  // Every installer is in place; only the Windows checksum file is missing.
+  const artifactFetcher: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const asset = installers.find((candidate) => url.startsWith(candidate.publicUrl));
+    assert.ok(asset, url);
+    if (init?.method === "HEAD") {
+      return new Response(null, { status: 200, headers: { "Content-Length": String(asset.bytes), "Cache-Control": "public,max-age=31536000,immutable" } });
+    }
+    if (url.includes("win32")) return new Response("Not found", { status: 404 });
+    return new Response(`${asset.sha256}  ${asset.fileName}\n`, { status: 200, headers: { "Cache-Control": "public,max-age=31536000,immutable" } });
+  };
+  let accepted: string | null = null;
+  const loader = createDesktopReleaseManifestLoader({
+    fetcher: async () => new Response(JSON.stringify(release), { status: 200 }),
+    verifyRelease: (loaded) => verifyMacDesktopReleaseArtifacts(loaded, artifactFetcher),
+    acceptVersion: async (version) => { accepted = version; },
+  });
+  const app = express();
+  registerDesktopDownloadRoutes(app, {
+    loadCurrentRelease: () => loader("https://downloads.letagents.chat/desktop/current.json", 45_000),
+    canUseBundledFallback: async () => false,
+  });
+  const server = app.listen(0, "127.0.0.1");
+  t.after(() => server.close());
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  for (const architecture of ["arm64", "x64"] as const) {
+    const mac = await fetch(`${baseUrl}/downloads/mac/${architecture}`, { redirect: "manual" });
+    assert.equal(mac.status, 302, architecture);
+    assert.equal(mac.headers.get("location"), release.assets[architecture].publicUrl);
+  }
+  const windows = await fetch(`${baseUrl}/downloads/windows/x64`, { redirect: "manual" });
+  assert.equal(windows.status, 503);
+  assert.equal(windows.headers.get("cache-control"), "no-store");
+  // The landing page's manifest offers no Windows link while its proof fails.
+  const manifest = await (await fetch(`${baseUrl}/downloads/mac/current.json`)).json() as { windows: unknown; version: string };
+  assert.equal(manifest.version, "0.1.131");
+  assert.equal(manifest.windows, null);
+  assert.equal(accepted, "0.1.131", "the proved Mac installers carry the release");
+});
+
+test("a Mac installer that fails its proof uses the bundled fallback or fails closed, never the unproven file", async (t) => {
+  const release = JSON.parse(JSON.stringify(windowsRelease)) as typeof windowsRelease;
+  await verifyMacDesktopReleaseArtifacts(release, async (input, init) => {
+    const url = String(input);
+    const asset = [release.assets.arm64, release.assets.x64, release.windows.x64].find((candidate) => url.startsWith(candidate.publicUrl))!;
+    if (url.includes("darwin-x64")) return new Response("Not found", { status: 404 });
+    return init?.method === "HEAD"
+      ? new Response(null, { status: 200, headers: { "Content-Length": String(asset.bytes), "Cache-Control": "immutable" } })
+      : new Response(`${asset.sha256}  ${asset.fileName}\n`, { status: 200, headers: { "Cache-Control": "immutable" } });
+  });
+  let fallback = false;
+  const app = express();
+  registerDesktopDownloadRoutes(app, { loadCurrentRelease: async () => release, canUseBundledFallback: async () => fallback });
+  const server = app.listen(0, "127.0.0.1");
+  t.after(() => server.close());
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  assert.equal((await fetch(`${baseUrl}/downloads/mac/arm64`, { redirect: "manual" })).status, 302);
+  assert.equal((await fetch(`${baseUrl}/downloads/windows/x64`, { redirect: "manual" })).status, 302);
+  assert.equal((await fetch(`${baseUrl}/downloads/mac/x64`, { redirect: "manual" })).status, 503);
+  fallback = true;
+  const bundled = await fetch(`${baseUrl}/downloads/mac/x64`, { redirect: "manual" });
+  assert.equal(bundled.status, 302);
+  assert.notEqual(bundled.headers.get("location"), release.assets.x64.publicUrl);
 });

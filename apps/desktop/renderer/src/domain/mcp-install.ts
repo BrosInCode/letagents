@@ -9,15 +9,8 @@ export const fallbackMcpInstallState: DesktopMcpInstallState = {
       id: "claude-code",
       name: "Claude Code",
       description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
-      configPath: "~/.claude/settings.json",
+      configPath: "~/.claude.json",
       configPaths: [
-        {
-          path: "~/.claude/settings.json",
-          label: "Claude settings",
-          status: "not_installed",
-          hasLetAgents: false,
-          issue: null,
-        },
         {
           path: "~/.claude.json",
           label: "Claude user config",
@@ -35,11 +28,11 @@ export const fallbackMcpInstallState: DesktopMcpInstallState = {
       id: "antigravity",
       name: "Antigravity",
       description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
-      configPath: "~/.gemini/settings.json",
+      configPath: "~/.gemini/config/mcp_config.json",
       configPaths: [
         {
-          path: "~/.gemini/settings.json",
-          label: "Antigravity settings",
+          path: "~/.gemini/config/mcp_config.json",
+          label: "Antigravity MCP config",
           status: "not_installed",
           hasLetAgents: false,
           issue: null,

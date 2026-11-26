@@ -7,7 +7,7 @@
             Open in LetAgents<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
           </a>
           <p v-if="view.kind === 'signed_out'" class="company-link-note">
-            Don’t have the app? Download for <a :href="release.downloads.arm64">Apple silicon</a> or <a :href="release.downloads.x64">Intel</a>, then open this link again.
+            Don’t have the app? Download for <template v-for="(link, index) in downloadLinks" :key="link.href"><a :href="link.href">{{ link.label }}</a>{{ downloadListSeparator(index, downloadLinks.length) }}</template>, then open this link again.
             <button type="button" class="company-link-text" :disabled="isSigningIn" @click="run('sign_in')">Use LetAgents in the browser instead</button>
           </p>
           <p v-else-if="view.kind === 'join' || view.kind === 'setup'" class="company-link-note">
@@ -34,7 +34,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
-import { MAC_DESKTOP_BETA } from '@/domain/desktopRelease'
+import { MAC_DESKTOP_BETA, desktopDownloadLinks, detectDesktopVisitorPlatform, downloadListSeparator } from '@/domain/desktopRelease'
 import CompanyInvitePanel from '../../../../shared/ui/company-invite/CompanyInvitePanel.vue'
 import type { CompanyInviteAction, CompanyInviteView } from '../../../../shared/ui/company-invite/types'
 import { companyInviteView, isCompanyLinkId } from '../../../../shared/ui/company-invite/view'
@@ -46,7 +46,7 @@ type Status = 'idle' | 'loading' | 'ready' | 'github_access_required' | 'unavail
 
 const route = useRoute()
 const { isSignedIn, isSigningIn, hasCheckedSession, user, checkSession, signIn } = useAuth()
-const release = MAC_DESKTOP_BETA
+const downloadLinks = desktopDownloadLinks(MAC_DESKTOP_BETA, detectDesktopVisitorPlatform(typeof navigator === 'undefined' ? undefined : navigator))
 const organizationId = computed(() => String(route.params.organizationId ?? ''))
 const appLink = computed(() => `letagents://company/${organizationId.value}`)
 const viewerLogin = computed(() => isSignedIn.value ? user.value?.login ?? null : null)

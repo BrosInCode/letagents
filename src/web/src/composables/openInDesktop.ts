@@ -1,6 +1,6 @@
 import { computed, readonly, ref } from 'vue'
 import { buildDesktopRoomLink } from '../../../../shared/room-app-links.mjs'
-import { MAC_DESKTOP_BETA, detectDesktopVisitorPlatform, type DesktopVisitorPlatform } from '../domain/desktopRelease'
+import { MAC_DESKTOP_BETA, detectDesktopVisitorPlatform, singleDesktopDownloadHref, type DesktopVisitorPlatform } from '../domain/desktopRelease'
 
 /** localStorage: 'always' once the person chose to open rooms in the app on load. */
 export const OPEN_IN_DESKTOP_PREFERENCE_KEY = 'lac-open-in-desktop'
@@ -36,9 +36,7 @@ export function createOpenInDesktop(deps: OpenInDesktopDeps) {
   const visible = computed(() => Boolean(roomId.value) && supported.value && !dismissed.value.has(roomId.value!))
   const state = computed<OpenInDesktopState>(() => (opened.value ? 'opening' : 'offer'))
   const link = computed(() => (roomId.value ? buildDesktopRoomLink(roomId.value) : ''))
-  const downloadHref = computed(() => deps.platform() === 'windows'
-    ? MAC_DESKTOP_BETA.downloads.windows ?? '/#download-mac'
-    : MAC_DESKTOP_BETA.downloads.arm64)
+  const downloadHref = computed(() => singleDesktopDownloadHref(MAC_DESKTOP_BETA, deps.platform()))
 
   /** The room the page shows. With Always on, the app opens as soon as the room is known. */
   function setRoom(id: string | null) {

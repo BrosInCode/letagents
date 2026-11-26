@@ -124,6 +124,9 @@ async function createApplicationIcon() {
   await rm(iconset, { recursive: true, force: true });
 }
 
+/** Electron's MIT license and Chromium's third-party notices, as Electron ships them. */
+const ELECTRON_NOTICE_FILES = ["LICENSE", "LICENSES.chromium.html"];
+
 async function assembleMacBundle() {
   await cp(join(root, "node_modules", "electron", "dist", "Electron.app"), bundle, {
     recursive: true,
@@ -167,6 +170,11 @@ async function assembleMacBundle() {
   await execFileAsync("plutil", ["-insert", "CFBundleURLTypes", "-json",
     JSON.stringify([{ CFBundleURLName: `${profile.productName} links`, CFBundleURLSchemes: [profile.protocol] }]), infoPlist]);
   await createApplicationIcon();
+  // Electron ships its own and Chromium's notices beside Electron.app, not in
+  // it; the Windows build copies the whole folder, so it has them already.
+  for (const notice of ELECTRON_NOTICE_FILES) {
+    await cp(join(root, "node_modules", "electron", "dist", notice), join(resources, notice));
+  }
 }
 
 // The Windows installer (package-windows.mjs) registers letagents:// links,
@@ -442,6 +450,12 @@ const required = [
     absolutePath: join(bundle, relative),
     manifestPath: relative,
   })),
+  // The notices Electron's and Chromium's licenses require: beside the
+  // executable on Windows (Electron's own layout), in Contents/Resources on macOS.
+  ...ELECTRON_NOTICE_FILES.map((notice) => {
+    const absolutePath = join(windows ? bundle : resources, notice);
+    return { absolutePath, manifestPath: bundlePath(absolutePath) };
+  }),
   ...[
     "shared/agent-branch.mjs",
     "shared/api-agent-tools.mjs",
