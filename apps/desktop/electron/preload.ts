@@ -568,6 +568,19 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:workers:run-agent-provider-preflight", providerId, input),
     runAgentProviderSetup: (providerId, input) =>
       ipcRenderer.invoke("desktop:workers:run-agent-provider-setup", providerId, input),
+    startProviderSignIn: (providerId) =>
+      ipcRenderer.invoke("desktop:workers:start-provider-sign-in", providerId),
+    submitProviderSignInCode: (providerId, code) =>
+      ipcRenderer.invoke("desktop:workers:submit-provider-sign-in-code", providerId, code),
+    cancelProviderSignIn: (providerId) =>
+      ipcRenderer.invoke("desktop:workers:cancel-provider-sign-in", providerId),
+    onProviderSignInUpdate: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:workers:provider-sign-in-update", listener);
+      return () => {
+        ipcRenderer.off("desktop:workers:provider-sign-in-update", listener);
+      };
+    },
   },
   maintenance: process.platform === "darwin" || process.platform === "win32" ? {
     getStatus: () => ipcRenderer.invoke("desktop:maintenance:status"),

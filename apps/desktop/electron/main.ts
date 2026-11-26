@@ -31,6 +31,7 @@ import { initializeDesktopUpdates, stopDesktopUpdates } from "./main/updates.js"
 import { applyWindowsAppUserModelId, startWindowsSmokeNotification } from "./main/windows-app-identity.js";
 import { stopActiveRentalProviderHostManager } from "./rental/provider-host-manager.js";
 import { stopActiveRentalProviderEventPoller } from "./rental/provider-event-poller.js";
+import { desktopProviderSignIn } from "./main/agents/provider-sign-in.js";
 
 configureDesktopSmokeEnvironment();
 // Off macOS a link starts a second instance: it hands the link to the running app and exits before starting anything.
@@ -150,6 +151,7 @@ function startDesktopApp(): void {
     void stopDesktopRoomStream();
     void stopActiveRentalProviderHostManager();
     void stopActiveRentalProviderEventPoller();
+    desktopProviderSignIn.cancelAll();
   });
 
   app.on("window-all-closed", () => {

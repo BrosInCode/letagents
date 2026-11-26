@@ -67,11 +67,8 @@
               :show-worktrees="showWorktreePicker"
               :worktrees="matchingWorktrees"
               :worktree-description="worktreePickerDescription"
-              :auth-command="authCommand"
-              :copying-auth-command="copyingAuthCommand"
               :install-command="installCommand"
               @refresh="retryProviderSetup"
-              @copy-auth-command="copyAgentAuthCommand"
               @choose-worktree="chooseWorktree"
               @open-secure-storage="openSecureCredentialStorage"
             >
@@ -124,6 +121,13 @@
               :supervisor-error-shown="preflight?.blockedBySupervisor"
             />
 
+            <AddAgentSignIn
+              :controller="providerSignIn"
+              :needs-sign-in="preflight?.nextAction === 'authenticate'"
+              :auth-command="authCommand"
+              :copying="copyingAuthCommand"
+              @copy-command="copyAgentAuthCommand()"
+            />
             <AddAgentFeedback v-if="setupMessage" :message="setupMessage" :tone="setupMessageTone" />
 
 
@@ -147,6 +151,7 @@
             ? setupActionButtonText(preflight.nextAction)
             : ''"
                 :copying-auth-command="copyingAuthCommand"
+                :sign-in-state="providerSignIn.update.value?.state ?? null"
                 :install-command="installCommand"
                 :install-url="installUrl"
                 :can-create-worktree="canCreateWorktree"
@@ -163,7 +168,7 @@
                 :supervised="supervisedUi"
                 :charter-missing="!supervisedCharter.trim()"
                 @setup-action="runSetupAction"
-                @copy-auth-command="copyAgentAuthCommand"
+                @sign-in="providerSignIn.start()"
                 @copy-install-command="copyAgentAuthCommand(installCommand)"
                 @open-install-guide="openProviderInstallGuide"
                 @refresh="retryProviderSetup"
@@ -195,6 +200,7 @@ import AddAgentFirstMessage from "./add-agent/AddAgentFirstMessage.vue";
 import AddAgentRuntimeSettings from "./add-agent/AddAgentRuntimeSettings.vue";
 import AddAgentSupervisedLaunch from "./add-agent/AddAgentSupervisedLaunch.vue";
 import AddAgentFeedback from "./add-agent/AddAgentFeedback.vue";
+import AddAgentSignIn from "./add-agent/AddAgentSignIn.vue";
 import {
   useAddAgentController,
   type AddAgentModalEmit,
@@ -210,7 +216,7 @@ import {
 
 const props = defineProps<AddAgentModalProps>();
 const emit = defineEmits<AddAgentModalEvents>();
-const { configuredName, configuredAvatar, roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, customModelError, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
+const { configuredName, configuredAvatar, roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, customModelError, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, providerSignIn, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
 
 const { dialogElement, openModelSettings, handleAfterLeave, handleDialogTab, handleRecoverSupervisedLaunch, step, identityError, identityAvatar, motionPaused, turnBody, turnStage, turning, showStep } = useAgentSetupPresentation(props, configuredName, configuredAvatar, supervisedUi);
 
