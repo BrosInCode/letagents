@@ -266,6 +266,9 @@ test("an update and the uninstaller delete only what the install manifest lists"
   assert.match(listed, /StrChrW\(w R6, i 58\)/);
   assert.match(listed, /\$\{If\} \$R5 S== "F "\s+Delete "\$PayloadRoot\\\$R6"\s+\$\{ElseIf\} \$R5 S== "D "\s+RMDir "\$PayloadRoot\\\$R6"/);
   assert.doesNotMatch(listed, /RMDir \/r/);
+  // The manifest stays until its caller is done, so a stopped run finds it again.
+  assert.doesNotMatch(listed, /Delete "\$PayloadRoot\\\$\{INSTALL_MANIFEST\}"/);
+  assert.match(between(script, "Function ${PREFIX}MergeBackLeftovers", "FunctionEnd"), /\$\{AndIf\} "\$0\$2" != "\$\{INSTALL_MANIFEST\}"/);
   // The old version in the backup folder: listed files go, the rest moves back,
   // except a pre-manifest install in the default folder, which goes whole.
   const discard = between(script, "Function ${PREFIX}DiscardOldVersion", "FunctionEnd");
@@ -285,6 +288,7 @@ test("an update and the uninstaller delete only what the install manifest lists"
   // The uninstaller: the manifest, and the recursive legacy removal only without one in the default folder.
   const uninstallPayload = between(script, "Function un.RemoveInstalledPayload", "FunctionEnd");
   assert.match(uninstallPayload, /StrCpy \$PayloadRoot "\$INSTDIR"\s+Call un\.RemoveListedPayload\s+\$\{If\} \$R9 == "0"\s+\$\{AndIf\} \$INSTDIR == "\$LOCALAPPDATA\\Programs\\\$\{PRODUCT_NAME\}"\s+!insertmacro REMOVE_LETAGENTS_PAYLOAD/);
+  assert.match(uninstallPayload, /!insertmacro REMOVE_LETAGENTS_PAYLOAD\s+\$\{EndIf\}\s+Delete "\$INSTDIR\\\$\{INSTALL_MANIFEST\}"/);
   assert.equal(script.match(/!insertmacro REMOVE_LETAGENTS_PAYLOAD/g)?.length, 1);
 });
 

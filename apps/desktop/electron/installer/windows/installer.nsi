@@ -317,7 +317,9 @@ FunctionEnd
 ; stays, and so does every folder that holds one, also in a custom /D=
 ; folder shared with other files. A line that is not "F " or "D " and a path
 ; inside the folder (not empty, no leading separator, no ":" and no "..") is
-; skipped. Sets $R9 to 1 when the manifest was there, else 0. Uses $R3-$R9.
+; skipped. The manifest itself stays: the caller deletes it when it is done,
+; so a run that stops before then still finds it. Sets $R9 to 1 when the
+; manifest was there, else 0. Uses $R3-$R9.
 !macro DEFINE_REMOVE_LISTED_PAYLOAD PREFIX
 Function ${PREFIX}RemoveListedPayload
   StrCpy $R9 "0"
@@ -364,13 +366,13 @@ Function ${PREFIX}RemoveListedPayload
     ${EndIf}
   ${Loop}
   FileClose $R3
-  Delete "$PayloadRoot\${INSTALL_MANIFEST}"
 FunctionEnd
 
 ; Moves each entry below $INSTDIR\${BACKUP_DIR}\<rel> back to $INSTDIR\<rel>:
 ; an entry that is not there moves whole; a folder that is there too is
 ; merged the same way; a file that is there stays behind (the installed
-; version's file wins). Takes <rel> ("" or "x\y\") on the stack. Keeps $0-$2.
+; version's file wins). The old install manifest stays behind. Takes <rel>
+; ("" or "x\y\") on the stack. Keeps $0-$2.
 Function ${PREFIX}MergeBackLeftovers
   Exch $0
   Push $1
@@ -379,6 +381,7 @@ Function ${PREFIX}MergeBackLeftovers
   ${DoWhile} $2 != ""
     ${If} $2 != "."
     ${AndIf} $2 != ".."
+    ${AndIf} "$0$2" != "${INSTALL_MANIFEST}"
       ${IfNot} ${FileExists} "$INSTDIR\$0$2"
         Rename "$INSTDIR\${BACKUP_DIR}\$0$2" "$INSTDIR\$0$2"
       ${ElseIf} ${FileExists} "$INSTDIR\${BACKUP_DIR}\$0$2\*.*"
@@ -401,7 +404,9 @@ FunctionEnd
 ; (0.1.143 and earlier) is deleted whole only in the default folder, which
 ; LetAgents owns; in any other folder all of it moves back where the new
 ; version has no file of the same path, so nothing LetAgents did not install
-; is deleted (old files the new version dropped stay too). Uses $R3-$R9.
+; is deleted (old files the new version dropped stay too). The old manifest
+; goes only with ${BACKUP_DIR} at the end: a run that stops before then
+; repeats this with it. Uses $R3-$R9.
 Function ${PREFIX}DiscardOldVersion
   Delete "$INSTDIR\${BACKUP_DIR}\${MOVED_IN_LIST}"
   StrCpy $PayloadRoot "$INSTDIR\${BACKUP_DIR}"
@@ -735,6 +740,7 @@ Function un.RemoveInstalledPayload
   ${AndIf} $INSTDIR == "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
     !insertmacro REMOVE_LETAGENTS_PAYLOAD
   ${EndIf}
+  Delete "$INSTDIR\${INSTALL_MANIFEST}"
 FunctionEnd
 
 ; User data (%APPDATA%\LetAgents) stays, as it does when the macOS app is

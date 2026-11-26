@@ -308,6 +308,22 @@ test("the Windows installer installs, updates, keeps the old version on a failed
       assertNoUpdateFolders(directory, "after the uninstall");
     });
 
+    await withInstall("an update stopped while it discarded the old version still keeps the user's files", async (directory) => {
+      // The state a stop inside step 6 leaves: the new version is in, and the
+      // backup holds the old manifest, part of the old files and a user file.
+      const backup = join(directory, WINDOWS_BACKUP_DIR);
+      await mkdir(join(backup, "locales"), { recursive: true });
+      for (const name of ["resources", WINDOWS_INSTALL_MANIFEST_NAME]) await rename(join(directory, name), join(backup, name));
+      await writeFile(join(backup, "locales", "user-notes.txt"), KEPT["locales/user-notes.txt"]);
+      await rm(join(directory, "LetAgents.exe"));
+      await rm(join(directory, "ffmpeg.dll"));
+      await rm(join(directory, "locales"), { recursive: true });
+      await writePayload(directory, V2);
+      await writeFile(join(directory, WINDOWS_INSTALL_MANIFEST_NAME), createInstallManifest(await listPayloadPaths(join(root, "payload-2.0.0"))));
+      assert.equal(run(v2, ["--updated", "/S", `/D=${directory}`]), 0);
+      await assertInstalled(directory, V2, "after the recovery", { "locales/user-notes.txt": KEPT["locales/user-notes.txt"] });
+    });
+
     await withInstall("an update over an install without a manifest (0.1.143) in a custom folder deletes nothing else", async (directory) => {
       await rm(join(directory, WINDOWS_INSTALL_MANIFEST_NAME));
       await writePayload(directory, KEPT);
