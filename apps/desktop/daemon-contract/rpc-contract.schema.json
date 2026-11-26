@@ -95,14 +95,20 @@
           ],
           "type": "object"
         }
-      ]
+      ],
+      "id": "AgentAvatar"
     },
     "DaemonActivityEvent": {
+      "id": "DaemonActivityEvent",
       "properties": {
         "durable_payload_ref": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "kind": {
@@ -160,6 +166,7 @@
       "type": "object"
     },
     "DaemonAgentConfigurationApplyResult": {
+      "id": "DaemonAgentConfigurationApplyResult",
       "properties": {
         "outcome": {
           "enum": [
@@ -214,9 +221,11 @@
           ],
           "type": "object"
         }
-      ]
+      ],
+      "id": "DaemonAgentConfigurationUpdateResult"
     },
     "DaemonAgentConfigurationView": {
+      "id": "DaemonAgentConfigurationView",
       "properties": {
         "charter": {
           "type": "string"
@@ -276,15 +285,23 @@
           "type": "string"
         },
         "model": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "permission_profile_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "provider": {
@@ -341,6 +358,7 @@
       "type": "object"
     },
     "DaemonAgentStreamEvent": {
+      "id": "DaemonAgentStreamEvent",
       "properties": {
         "kind": {
           "type": "string"
@@ -363,9 +381,13 @@
           "type": "integer"
         },
         "summary": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -380,6 +402,7 @@
       "type": "object"
     },
     "DaemonAsyncRpcAccepted": {
+      "id": "DaemonAsyncRpcAccepted",
       "properties": {
         "daemon_generation": {
           "maximum": 9007199254740991,
@@ -406,9 +429,11 @@
         "rpc_install_host_grant",
         "rpc_retire_agent"
       ],
+      "id": "DaemonAsyncRpcEffectKind",
       "type": "string"
     },
     "DaemonAttemptDetail": {
+      "id": "DaemonAttemptDetail",
       "properties": {
         "activity": {
           "items": {
@@ -447,15 +472,23 @@
           "type": "integer"
         },
         "work_attempt_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "workspace_path": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -472,11 +505,16 @@
       "type": "object"
     },
     "DaemonBootstrapRoomIngressResult": {
+      "id": "DaemonBootstrapRoomIngressResult",
       "properties": {
         "last_observed_message_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "status": {
@@ -495,6 +533,7 @@
       "type": "object"
     },
     "DaemonCapabilities": {
+      "id": "DaemonCapabilities",
       "properties": {
         "agent_activity_stream_v1": {
           "type": "boolean"
@@ -552,6 +591,7 @@
       "additionalProperties": {
         "$ref": "#/$defs/JsonValue"
       },
+      "id": "DaemonInspectorDetail",
       "properties": {
         "availability": {
           "enum": [
@@ -585,9 +625,13 @@
           ]
         },
         "inbox_item_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "items": {
@@ -640,9 +684,13 @@
           "$ref": "#/$defs/JsonRecord"
         },
         "requested_source_message_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "room_id": {
@@ -718,6 +766,7 @@
       "type": "object"
     },
     "DaemonInstallHostGrantResult": {
+      "id": "DaemonInstallHostGrantResult",
       "properties": {
         "agent_session_id": {
           "type": "string"
@@ -737,6 +786,7 @@
       "type": "object"
     },
     "DaemonLegacyStateReset": {
+      "id": "DaemonLegacyStateReset",
       "properties": {
         "backup_name": {
           "type": "string"
@@ -766,6 +816,7 @@
       "type": "object"
     },
     "DaemonManifestEntryView": {
+      "id": "DaemonManifestEntryView",
       "properties": {
         "activity": {
           "items": {
@@ -827,9 +878,13 @@
           "type": "array"
         },
         "deployment_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "desired_state": {
@@ -850,9 +905,13 @@
           "type": "string"
         },
         "last_error": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "last_turn_control_sequence": {
@@ -884,23 +943,35 @@
           "type": "string"
         },
         "model": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "native_liveness": {
           "properties": {
             "detail": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "observed_at": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "state": {
@@ -929,9 +1000,13 @@
           "type": "boolean"
         },
         "permission_profile_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "provider": {
@@ -974,9 +1049,13 @@
           ]
         },
         "ready_reached_at": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "reasoning_effort": {
@@ -1019,9 +1098,13 @@
           "type": "string"
         },
         "run_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "runtime_configuration_revision": {
@@ -1030,9 +1113,13 @@
           "type": "integer"
         },
         "runtime_generation_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "runtime_recovery": {
@@ -1082,9 +1169,13 @@
           ]
         },
         "source_repo_path": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "turn_control": {
@@ -1098,9 +1189,13 @@
           ]
         },
         "work_attempt_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "worker_binding": {
@@ -1116,15 +1211,23 @@
         "workplace_liveness": {
           "properties": {
             "detail": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "observed_at": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "state": {
@@ -1144,9 +1247,13 @@
           "type": "object"
         },
         "workspace_path": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -1187,9 +1294,13 @@
               ]
             },
             "processIdentity": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "url": {
@@ -1222,9 +1333,13 @@
               ]
             },
             "processIdentity": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -1253,9 +1368,13 @@
               ]
             },
             "processIdentity": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -1284,9 +1403,13 @@
               ]
             },
             "processIdentity": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "serverAuthPath": {
@@ -1323,9 +1446,13 @@
               ]
             },
             "processIdentity": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -1335,9 +1462,11 @@
           ],
           "type": "object"
         }
-      ]
+      ],
+      "id": "DaemonProviderConnection"
     },
     "DaemonProviderRuntimeReference": {
+      "id": "DaemonProviderRuntimeReference",
       "properties": {
         "execution_generation_id": {
           "type": "string"
@@ -1446,9 +1575,11 @@
           ],
           "type": "object"
         }
-      ]
+      ],
+      "id": "DaemonPurgeAgentResult"
     },
     "DaemonRecoverAgentRuntimeResult": {
+      "id": "DaemonRecoverAgentRuntimeResult",
       "properties": {
         "entry": {
           "$ref": "#/$defs/DaemonManifestEntryView"
@@ -1465,6 +1596,7 @@
       "type": "object"
     },
     "DaemonRequestEnvelope": {
+      "id": "DaemonRequestEnvelope",
       "properties": {
         "id": {
           "type": "string"
@@ -1488,6 +1620,7 @@
       "type": "object"
     },
     "DaemonResponseEnvelope": {
+      "id": "DaemonResponseEnvelope",
       "properties": {
         "error": {
           "type": "string"
@@ -1581,7 +1714,8 @@
           ],
           "type": "object"
         }
-      ]
+      ],
+      "id": "DaemonRetireAgentResult"
     },
     "DaemonRoomMovePhase": {
       "enum": [
@@ -1595,23 +1729,33 @@
         "failed",
         "rollback_required"
       ],
+      "id": "DaemonRoomMovePhase",
       "type": "string"
     },
     "DaemonRoomMoveRecord": {
+      "id": "DaemonRoomMoveRecord",
       "properties": {
         "activating_inbox_item_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "agent_id": {
           "type": "string"
         },
         "agent_session_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "created_at": {
@@ -1623,30 +1767,46 @@
           "type": "integer"
         },
         "destination_cursor": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "destination_room_id": {
           "type": "string"
         },
         "effect_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "error": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "execution_generation_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "operation_id": {
@@ -1656,15 +1816,23 @@
           "$ref": "#/$defs/DaemonRoomMovePhase"
         },
         "provider_turn_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "remote_room_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "request_id": {
@@ -1674,9 +1842,13 @@
           "type": "boolean"
         },
         "source_cursor": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "source_cursor_present": {
@@ -1689,9 +1861,13 @@
           "type": "string"
         },
         "work_attempt_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -1728,9 +1904,11 @@
         "failed",
         "uncertain"
       ],
+      "id": "DaemonRpcEffectState",
       "type": "string"
     },
     "DaemonRpcEffectView": {
+      "id": "DaemonRpcEffectView",
       "properties": {
         "agent_id": {
           "minLength": 1,
@@ -1748,9 +1926,13 @@
           "type": "string"
         },
         "error": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "kind": {
@@ -1784,6 +1966,7 @@
       "type": "object"
     },
     "DaemonStateWatchChanges": {
+      "id": "DaemonStateWatchChanges",
       "properties": {
         "complete": {
           "const": false,
@@ -1842,9 +2025,11 @@
         {
           "$ref": "#/$defs/DaemonStateWatchSnapshot"
         }
-      ]
+      ],
+      "id": "DaemonStateWatchResult"
     },
     "DaemonStateWatchSnapshot": {
+      "id": "DaemonStateWatchSnapshot",
       "properties": {
         "daemon_generation": {
           "maximum": 9007199254740991,
@@ -1877,14 +2062,19 @@
       "type": "object"
     },
     "DaemonStatus": {
+      "id": "DaemonStatus",
       "properties": {
         "capabilities": {
           "$ref": "#/$defs/DaemonCapabilities"
         },
         "compatibility_fingerprint": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "generation": {
@@ -1909,9 +2099,13 @@
           ]
         },
         "maintenance_hold_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "pid": {
@@ -1925,9 +2119,13 @@
           "type": "integer"
         },
         "runtime_environment_fingerprint": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "started_at": {
@@ -1948,6 +2146,7 @@
       "type": "object"
     },
     "DaemonTurnControlEffect": {
+      "id": "DaemonTurnControlEffect",
       "properties": {
         "action_id": {
           "type": "string"
@@ -1980,15 +2179,23 @@
           ]
         },
         "correction_text": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "error": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "execution_generation_id": {
@@ -1998,15 +2205,23 @@
           "type": "boolean"
         },
         "inbox_item_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "interrupted": {
-          "type": [
-            "boolean",
-            "null"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "operator_resolution": {
@@ -2024,18 +2239,26 @@
           ]
         },
         "provider_turn_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "recorded_at": {
           "type": "string"
         },
         "resumed": {
-          "type": [
-            "boolean",
-            "null"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "stages": {
@@ -2076,21 +2299,33 @@
           "type": "string"
         },
         "target_provider_continuation_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "target_room_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "target_source_message_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "updated_at": {
@@ -2119,6 +2354,7 @@
       "type": "object"
     },
     "DaemonTurnControlResult": {
+      "id": "DaemonTurnControlResult",
       "properties": {
         "actionId": {
           "type": "string"
@@ -2185,6 +2421,7 @@
       "type": "object"
     },
     "DaemonWorkerBindingProjection": {
+      "id": "DaemonWorkerBindingProjection",
       "properties": {
         "agent_session_id": {
           "type": "string"
@@ -2208,6 +2445,7 @@
       "type": "object"
     },
     "DeliveryAttention": {
+      "id": "DeliveryAttention",
       "properties": {
         "blocked_since": {
           "type": "string"
@@ -2216,9 +2454,13 @@
           "type": "boolean"
         },
         "detail": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "provider_work_started": {
@@ -2238,9 +2480,13 @@
           "type": "string"
         },
         "skip_unavailable_reason": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "source_message_id": {
@@ -2266,6 +2512,7 @@
       "type": "object"
     },
     "DeliveryReceipt": {
+      "id": "DeliveryReceipt",
       "properties": {
         "attempt_count": {
           "maximum": 9007199254740991,
@@ -2273,21 +2520,33 @@
           "type": "integer"
         },
         "blocked_by_message_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "canonical_message_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "error": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "failure_code": {
@@ -2309,9 +2568,13 @@
         "follow_up": {
           "properties": {
             "for_message_id": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "later_person_turn": {
@@ -2391,9 +2654,13 @@
           "type": "string"
         },
         "provider_turn_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "reply_client_message_id": {
@@ -2436,9 +2703,13 @@
           "items": {
             "properties": {
               "detail": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "event_sequence": {
@@ -2507,9 +2778,11 @@
         "paused",
         "stopped"
       ],
+      "id": "DesiredState",
       "type": "string"
     },
     "ExecutionGeneration": {
+      "id": "ExecutionGeneration",
       "properties": {
         "actor": {
           "type": "string"
@@ -2550,6 +2823,7 @@
       "type": "object"
     },
     "ExecutionTerminalPayload": {
+      "id": "ExecutionTerminalPayload",
       "properties": {
         "actor": {
           "type": "string"
@@ -2578,21 +2852,33 @@
           "$ref": "#/$defs/NativeRuntimeDeath"
         },
         "provider_continuation_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "signal": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "stdio_archive_ref": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "stdio_tail": {
@@ -2617,6 +2903,7 @@
     },
     "HostApprovalCandidate": {
       "additionalProperties": false,
+      "id": "HostApprovalCandidate",
       "properties": {
         "detail": {
           "anyOf": [
@@ -2758,6 +3045,7 @@
     },
     "HostApprovalChallenge": {
       "additionalProperties": false,
+      "id": "HostApprovalChallenge",
       "properties": {
         "bootNonce": {
           "pattern": "^[A-Za-z0-9_-]{43}$",
@@ -2782,6 +3070,7 @@
     },
     "HostApprovalReference": {
       "additionalProperties": false,
+      "id": "HostApprovalReference",
       "properties": {
         "agentId": {
           "maxLength": 256,
@@ -2878,10 +3167,12 @@
         "resolved",
         "unavailable"
       ],
+      "id": "HostApprovalStatus",
       "type": "string"
     },
     "HostToolRule": {
       "additionalProperties": false,
+      "id": "HostToolRule",
       "properties": {
         "createdAtMs": {
           "maximum": 9007199254740991,
@@ -2924,12 +3215,14 @@
         {
           "$ref": "#/$defs/RoomWorkspaceHostToolScope"
         }
-      ]
+      ],
+      "id": "HostToolScope"
     },
     "JsonRecord": {
       "additionalProperties": {
         "$ref": "#/$defs/JsonValue"
       },
+      "id": "JsonRecord",
       "propertyNames": {
         "type": "string"
       },
@@ -2964,9 +3257,11 @@
           },
           "type": "object"
         }
-      ]
+      ],
+      "id": "JsonValue"
     },
     "LaunchProgressView": {
+      "id": "LaunchProgressView",
       "properties": {
         "attempt": {
           "maximum": 9007199254740991,
@@ -2993,9 +3288,13 @@
           ]
         },
         "ended_at": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "failure": {
@@ -3035,9 +3334,13 @@
           ]
         },
         "first_output_at": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "phases": {
@@ -3119,6 +3422,7 @@
     },
     "NativeRuntimeDeath": {
       "additionalProperties": false,
+      "id": "NativeRuntimeDeath",
       "properties": {
         "kind": {
           "enum": [
@@ -3160,6 +3464,7 @@
         "stopped",
         "failed"
       ],
+      "id": "ObservedState",
       "type": "string"
     },
     "PolicyCondition": {
@@ -3171,10 +3476,12 @@
         "budget_blocked",
         "security_blocked"
       ],
+      "id": "PolicyCondition",
       "type": "string"
     },
     "ProjectHostToolScope": {
       "additionalProperties": false,
+      "id": "ProjectHostToolScope",
       "properties": {
         "accountId": {
           "maxLength": 256,
@@ -3258,6 +3565,7 @@
       "type": "object"
     },
     "ReconciliationNotice": {
+      "id": "ReconciliationNotice",
       "properties": {
         "at": {
           "type": "string"
@@ -3284,6 +3592,7 @@
       "type": "object"
     },
     "ReconciliationState": {
+      "id": "ReconciliationState",
       "properties": {
         "completed_action_ids": {
           "items": {
@@ -3314,9 +3623,13 @@
           "$ref": "#/$defs/ExecutionTerminalPayload"
         },
         "next_restart_at_ms": {
-          "type": [
-            "number",
-            "null"
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "pending_action": {
@@ -3371,6 +3684,7 @@
     },
     "RetiredRuntimeEvidence": {
       "additionalProperties": false,
+      "id": "RetiredRuntimeEvidence",
       "properties": {
         "death": {
           "$ref": "#/$defs/NativeRuntimeDeath"
@@ -3396,19 +3710,28 @@
       "type": "object"
     },
     "RoomAgentState": {
+      "id": "RoomAgentState",
       "properties": {
         "connection": {
           "properties": {
             "detail": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "observed_at": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "state": {
@@ -3430,15 +3753,23 @@
         "inbox": {
           "properties": {
             "blocked_by_message_id": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "detail": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "pending_count": {
@@ -3468,15 +3799,23 @@
         "ingress": {
           "properties": {
             "detail": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "observed_at": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "state": {
@@ -3509,15 +3848,23 @@
               "type": "string"
             },
             "task_id": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "title": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             }
           },
@@ -3531,27 +3878,43 @@
         "turn": {
           "properties": {
             "detail": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "inbox_item_id": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "provider_turn_id": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "source_message_id": {
-              "type": [
-                "string",
-                "null"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "state": {
@@ -3587,6 +3950,7 @@
     },
     "RoomWorkspaceHostToolScope": {
       "additionalProperties": false,
+      "id": "RoomWorkspaceHostToolScope",
       "properties": {
         "accountId": {
           "maxLength": 256,
@@ -3668,23 +4032,32 @@
       "type": "object"
     },
     "RunningBackgroundCommand": {
+      "id": "RunningBackgroundCommand",
       "properties": {
         "command": {
           "type": "string"
         },
         "started_at": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "task_id": {
           "type": "string"
         },
         "tool_use_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -3698,6 +4071,7 @@
     },
     "SignedHostApprovalRequest": {
       "additionalProperties": false,
+      "id": "SignedHostApprovalRequest",
       "properties": {
         "payload": {
           "type": "string"
@@ -3713,14 +4087,19 @@
       "type": "object"
     },
     "SupervisedPermissionProfile": {
+      "id": "SupervisedPermissionProfile",
       "properties": {
         "description": {
           "type": "string"
         },
         "detail": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "id": {
@@ -3761,20 +4140,29 @@
       "type": "object"
     },
     "WorkAttemptCheckpoint": {
+      "id": "WorkAttemptCheckpoint",
       "properties": {
         "at": {
           "type": "string"
         },
         "provider_continuation_id": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "room_cursor": {
-          "type": [
-            "string",
-            "null"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         }
       },
@@ -3797,7 +4185,7 @@
       "retireAgentMs": 60000
     },
     "defaultMaxRequestBytes": 65536,
-    "implementationVersion": "2.0.292",
+    "implementationVersion": "2.0.293",
     "localBoardMaxFrameBytes": 16777216,
     "protocolVersion": 3,
     "stateActivitySummaryLimit": 16,
@@ -4469,9 +4857,13 @@
             "type": "number"
           },
           "correction": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "daemon_generation": {
@@ -4668,9 +5060,13 @@
                 "type": "string"
               },
               "deployment_id": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "desired_state": {
@@ -4683,9 +5079,13 @@
                 "type": "string"
               },
               "last_error": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "last_turn_control_sequence": {
@@ -4707,23 +5107,35 @@
                 "type": "string"
               },
               "model": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "native_liveness": {
                 "properties": {
                   "detail": {
-                    "type": [
-                      "string",
-                      "null"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
                     ]
                   },
                   "observed_at": {
-                    "type": [
-                      "string",
-                      "null"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
                     ]
                   },
                   "state": {
@@ -4748,9 +5160,13 @@
                 "type": "string"
               },
               "permission_profile_id": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "provider": {
@@ -4794,9 +5210,13 @@
                 ]
               },
               "ready_reached_at": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "reasoning_effort": {
@@ -4829,9 +5249,13 @@
                 "type": "string"
               },
               "run_id": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "runtime_configuration_revision": {
@@ -4840,9 +5264,13 @@
                 "type": "integer"
               },
               "source_repo_path": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "turn_control": {
@@ -4856,23 +5284,35 @@
                 ]
               },
               "work_attempt_id": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "workplace_liveness": {
                 "properties": {
                   "detail": {
-                    "type": [
-                      "string",
-                      "null"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
                     ]
                   },
                   "observed_at": {
-                    "type": [
-                      "string",
-                      "null"
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
                     ]
                   },
                   "state": {
@@ -4892,9 +5332,13 @@
                 "type": "object"
               },
               "workspace_path": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               }
             },
@@ -5032,9 +5476,13 @@
       "params": {
         "properties": {
           "detail": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "id": {
@@ -5643,9 +6091,13 @@
             "type": "string"
           },
           "source_message_id": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -5884,9 +6336,13 @@
             "type": "string"
           },
           "owner_account_id": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "recovery_only": {
@@ -5896,9 +6352,13 @@
             "type": "string"
           },
           "scope_key": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "supervisor_grant": {
@@ -5938,9 +6398,13 @@
       "params": {
         "properties": {
           "api_key": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
           "base_url": {

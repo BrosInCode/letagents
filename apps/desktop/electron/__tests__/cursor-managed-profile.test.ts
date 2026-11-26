@@ -9,6 +9,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   symlinkSync,
   unlinkSync,
@@ -20,6 +21,7 @@ import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "#provider-runtime/agents/letagents-mcp-runtime.js";
+import { darwinLoginKeychainReadRoots, linkDarwinLoginKeychains } from "#provider-runtime/agents/cursor/profile-filesystem.js";
 import type { CursorSupervisedProfileOptions } from "#provider-runtime/agents/cursor-managed-profile.js";
 
 const { tempDir } = createElectronTestEnv({
@@ -1175,4 +1177,62 @@ test("Cursor MCP policy normalization defaults to filter_letagents", () => {
   assert.equal(normalizeCursorMcpPolicy(""), "filter_letagents");
   assert.equal(normalizeCursorMcpPolicy("normal"), "normal");
   assert.equal(normalizeCursorMcpPolicy("none"), "none");
+});
+
+const darwinOnly = { skip: process.platform !== "darwin" };
+
+function keychainFixture(name: string) {
+  const root = join(tempDir, `keychain-${name}`);
+  const accountHome = join(root, "account");
+  const accountKeychains = join(accountHome, "Library", "Keychains");
+  mkdirSync(accountKeychains, { recursive: true });
+  const sourceHome = join(root, "source");
+  mkdirSync(join(sourceHome, "Library"), { recursive: true });
+  const profileHome = join(root, "profile");
+  mkdirSync(profileHome, { recursive: true, mode: 0o700 });
+  return { root, accountHome, accountKeychains, sourceHome, sourceLink: join(sourceHome, "Library", "Keychains"), profileHome, profileLink: join(profileHome, "Library", "Keychains") };
+}
+
+test("a real login keychain directory is linked and used as the read root", darwinOnly, () => {
+  const f = keychainFixture("real");
+  mkdirSync(f.sourceLink, { recursive: true });
+  linkDarwinLoginKeychains(f.sourceHome, f.profileHome, f.accountHome);
+  assert.equal(readlinkSync(f.profileLink), f.sourceLink);
+  assert.deepEqual(darwinLoginKeychainReadRoots(f.sourceHome, f.accountHome), [realpathSync(f.sourceLink)]);
+});
+
+test("a Preview symlink to the account's real Keychains is accepted and the real path is used", darwinOnly, () => {
+  const f = keychainFixture("preview");
+  symlinkSync(f.accountKeychains, f.sourceLink, "dir");
+  const real = realpathSync(f.accountKeychains);
+  linkDarwinLoginKeychains(f.sourceHome, f.profileHome, f.accountHome);
+  assert.equal(readlinkSync(f.profileLink), real);
+  assert.deepEqual(darwinLoginKeychainReadRoots(f.sourceHome, f.accountHome), [real]);
+  linkDarwinLoginKeychains(f.sourceHome, f.profileHome, f.accountHome);
+  assert.equal(readlinkSync(f.profileLink), real, "a second call keeps the same link");
+});
+
+test("a login keychain symlink to any other directory is refused", darwinOnly, () => {
+  const f = keychainFixture("other");
+  const other = join(f.root, "other-dir");
+  mkdirSync(other, { recursive: true });
+  symlinkSync(other, f.sourceLink, "dir");
+  assert.throws(() => linkDarwinLoginKeychains(f.sourceHome, f.profileHome, f.accountHome), /must be a real directory/);
+  assert.throws(() => darwinLoginKeychainReadRoots(f.sourceHome, f.accountHome), /must be a real directory/);
+  assert.equal(existsSync(f.profileLink), false);
+});
+
+test("a login keychain symlink to a file is refused", darwinOnly, () => {
+  const f = keychainFixture("file");
+  const file = join(f.root, "a-file");
+  writeFileSync(file, "x");
+  symlinkSync(file, f.sourceLink);
+  assert.throws(() => linkDarwinLoginKeychains(f.sourceHome, f.profileHome, f.accountHome), /must be a real directory/);
+  assert.throws(() => darwinLoginKeychainReadRoots(f.sourceHome, f.accountHome), /must be a real directory/);
+});
+
+test("a login keychain symlink is refused when the account has no real Keychains", darwinOnly, () => {
+  const f = keychainFixture("noaccount");
+  symlinkSync(f.accountKeychains, f.sourceLink, "dir");
+  assert.throws(() => darwinLoginKeychainReadRoots(f.sourceHome, join(f.root, "nobody")), /must be a real directory/);
 });
