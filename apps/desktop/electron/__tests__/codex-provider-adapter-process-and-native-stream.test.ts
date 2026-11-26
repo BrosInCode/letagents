@@ -1028,3 +1028,36 @@ for (const race of ["none", "unloaded", "unloaded_permission", "unloaded_connect
     }
   });
 }
+
+function resumeRefOf(predecessor: { workAttemptId: string; providerContinuationId: string | null; providerConnection?: unknown }): ProviderContinuationRef {
+  return {
+    workAttemptId: predecessor.workAttemptId, providerContinuationId: predecessor.providerContinuationId!,
+    providerConnection: { ...(predecessor.providerConnection as object) },
+  } as ProviderContinuationRef;
+}
+
+test("Codex resume stops the surviving predecessor app-server before it starts a replacement", async () => {
+  // A daemon that ended or handed off leaves its Codex running. A successor that starts much later resumes
+  // the same conversation from the saved reference and must not leave that process behind.
+  const harness = createHarness({ processIdentity: OS_BIRTH.first, exitOnSignal: true });
+  const predecessor = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const ref = resumeRefOf(predecessor);
+  const oldPid = predecessor.providerConnection!.pid!;
+  const resumed = await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume(ref, spawnRequest({ deliveryMode: "daemon_inbox" }));
+  assert.equal(harness.launches.length, 2);
+  assert.equal(harness.launches[0]!.alive, false, "the recorded process birth is proved gone");
+  assert.equal(harness.signals[0]!.pid, oldPid, "the first signal goes to the exact recorded predecessor");
+  assert.ok(harness.signals.every((signal) => signal.pid === oldPid), "no signal goes to any other process");
+  assert.notEqual(resumed.providerConnection!.pid, oldPid);
+  assert.equal(resumed.providerContinuationId, ref.providerContinuationId);
+});
+
+test("Codex resume never signals a process that is not the recorded birth", async () => {
+  const harness = createHarness({ processIdentity: OS_BIRTH.first });
+  const predecessor = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const ref = resumeRefOf(predecessor);
+  harness.launches[0]!.processIdentity = OS_BIRTH.second; // the pid now belongs to another process
+  await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume(ref, spawnRequest({ deliveryMode: "daemon_inbox" }));
+  assert.deepEqual(harness.signals, [], "a recycled pid is not the predecessor and is never signalled");
+  assert.equal(harness.launches.length, 2);
+});
