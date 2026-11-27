@@ -10,6 +10,7 @@ import type {
 import { defaultSupervisedCharter } from "../src/components/desktop/content/add-agent/useAddAgentConfiguration";
 import {
   ONBOARDING_AGENT_DEFAULT_AVATAR,
+  ONBOARDING_AGENT_CHARTER,
   ONBOARDING_AGENT_DEFAULT_NAME,
   onboardingPermissionProfile,
   useOnboardingFirstRoom,
@@ -91,7 +92,9 @@ test("a new agent gets Add Agent's defaults in a room with no project", async ()
   assert.equal(input.displayName, "Atlas");
   assert.deepEqual(input.avatar, ONBOARDING_AGENT_DEFAULT_AVATAR);
   assert.equal(input.repoRootPath, null);
-  assert.equal(input.charter, defaultSupervisedCharter);
+  assert.equal(input.charter, ONBOARDING_AGENT_CHARTER);
+  assert.ok(input.charter.startsWith(defaultSupervisedCharter), "the first agent keeps the usual team rules");
+  assert.match(input.charter, /what LetAgents is/);
   assert.equal(input.permissionProfileId, "read_only");
   assert.equal((input.launchPolicy as { permissionMode?: string }).permissionMode, "dontAsk");
   assert.equal(input.model, null);

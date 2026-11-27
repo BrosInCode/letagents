@@ -28,6 +28,17 @@ export type FirstRoomState = "idle" | "running" | "done" | "failed";
 export const ONBOARDING_AGENT_DEFAULT_NAME = "Atlas";
 export const ONBOARDING_AGENT_DEFAULT_AVATAR: AgentAvatar = { kind: "character", character: "orbit", color: "sage" };
 export const ONBOARDING_ROOM_NAME = "Welcome";
+/**
+ * The first agent's first message. A new person meets LetAgents through this agent, so its
+ * hello says what LetAgents is, in plain words, before anything else.
+ */
+export const ONBOARDING_AGENT_CHARTER = [
+  defaultSupervisedCharter,
+  "This is the person's Welcome room, and you are their first agent in LetAgents.",
+  "LetAgents is a place where a team and its agents work together: each room holds the conversation, the agents, a task board and shared memory.",
+  "Say hello now in under 60 words: explain in one or two plain sentences what LetAgents is, then offer to help them start (open a project folder as a room, invite a teammate, or give you a first task).",
+  "Later, answer questions about LetAgents first and plainly, then help with their work.",
+].join(" ");
 
 export interface FirstRoomRunInput {
   providerId: DesktopAgentProviderId;
@@ -183,7 +194,7 @@ export function useOnboardingFirstRoom() {
         avatar: identity.avatar,
         roomIdentifier,
         repoRootPath: null,
-        charter: defaultSupervisedCharter,
+        charter: ONBOARDING_AGENT_CHARTER,
         permissionProfileId,
         launchPolicy: supervisedProviderLaunchPolicy(providerId, permissionProfileId),
         model: null,
