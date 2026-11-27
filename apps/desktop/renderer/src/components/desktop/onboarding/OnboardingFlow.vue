@@ -9,7 +9,8 @@
       <OnboardingCompanyStep v-if="stage === 'company'" key="company" ref="companyStep"
         v-model:organization-id="companyId" v-model:theme-id="companyTheme"
         :organizations="ownedOrganizations" :busy="companyBusy" :error="companyError"
-        @continue="setUpCompany" @skip="enterAgentStep" />
+        :access="companyAccess" :access-opened="accessOpened"
+        @continue="setUpCompany" @skip="enterAgentStep" @allow="allowCompanyAccess" @retry="checkCompanyAccess" />
       <OnboardingAgentStep v-else-if="stage === 'agent' || stage === 'setup'" key="agent" ref="agentStep"
         :phase="stage === 'setup' ? 'setup' : 'pick'" :accent="companyAccent"
         :providers="agents.providers.value" :selected-id="selectedProviderId"
@@ -29,7 +30,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { roomThemePresets, type RoomThemeId } from "../../../../../../../shared/room-themes.mjs";
 import type { DesktopAgentProviderId, DesktopAuthStatus } from "../../../../../electron/ipc-types";
-import type { DesktopOrganization } from "../../../../../electron/ipc-types/organizations";
+import type { DesktopGitHubAccessReason, DesktopOrganization } from "../../../../../electron/ipc-types/organizations";
 import OnboardingAgentStep from "./OnboardingAgentStep.vue";
 import OnboardingCompanyStep from "./OnboardingCompanyStep.vue";
 import OnboardingWelcome from "./OnboardingWelcome.vue";
@@ -47,6 +48,10 @@ const props = defineProps<{
   /** The person's GitHub organizations as LetAgents knows them, and whether that list has loaded. */
   organizations: DesktopOrganization[];
   organizationsLoading: boolean;
+  /** GitHub has not shared the person's organizations yet (the list's status), and why. */
+  organizationsAccess: DesktopGitHubAccessReason | null;
+  openOrganizationAccess: () => Promise<void>;
+  refreshOrganizations: () => Promise<void>;
   /** The company the app already has selected, if any. */
   selectedCompanyId: string | null;
   /** A company link opened the app: join that company during setup. */
@@ -74,12 +79,39 @@ const agentStep = ref<InstanceType<typeof OnboardingAgentStep> | null>(null);
 const morphing = ref(false);
 
 // ---- Company (owners only)
-const ownedOrganizations = computed(() => props.organizations.filter(org => org.role === "owner" && !org.setup));
+// Every company the person owns, set up or not: an owner can give it its colour here.
+// Companies that still need setting up come first.
+const ownedOrganizations = computed(() => props.organizations
+  .filter(org => org.role === "owner")
+  .sort((a, b) => Number(a.setup) - Number(b.setup)));
+// No organizations from GitHub yet: the company step asks for that access first.
+const companyAccess = computed(() => ownedOrganizations.value.length ? null : props.organizationsAccess);
+const accessOpened = ref(false);
+async function allowCompanyAccess() {
+  accessOpened.value = true;
+  try { await props.openOrganizationAccess(); } catch { companyError.value = "Couldn’t open GitHub. Try again."; }
+}
+async function checkCompanyAccess() {
+  if (companyBusy.value) return;
+  companyBusy.value = true;
+  companyError.value = null;
+  try { await props.refreshOrganizations(); } finally { companyBusy.value = false; }
+  if (companyAccess.value) companyError.value = "GitHub hasn’t shared your organizations yet. Allow it on GitHub, then check again.";
+}
+// Access came through (on return to the window, or Check again): owners pick their company; others go on.
+watch(() => [ownedOrganizations.value.length, companyAccess.value, props.organizationsLoading] as const, ([owned, access, loading]) => {
+  if (stage.value !== "company" || access || loading) return;
+  if (owned && !companyId.value) companyId.value = ownedOrganizations.value[0].github_org_id;
+  if (!owned) enterAgentStep();
+});
+const currentTheme = (id: string | null) => ownedOrganizations.value.find(org => org.github_org_id === id)?.theme_id ?? null;
 const companyId = ref<string | null>(null);
 const companyTheme = ref<RoomThemeId>("mint");
 const companyBusy = ref(false);
 const companyError = ref<string | null>(null);
 const chosenCompanyId = ref<string | null>(null);
+// Show the company's own colour first, so Continue changes nothing unless the owner picks a new one.
+watch(companyId, id => { companyTheme.value = currentTheme(id) ?? "mint"; });
 const companyAccent = computed(() => chosenCompanyId.value
   ? roomThemePresets.find(theme => theme.id === companyTheme.value)?.accent
   : undefined);
@@ -90,10 +122,13 @@ async function setUpCompany() {
   companyBusy.value = true;
   companyError.value = null;
   try {
+    // Read before choosing: choosing an unset company sets it up.
+    const wasSetUp = Boolean(ownedOrganizations.value.find(org => org.github_org_id === id)?.setup);
+    const themeBefore = currentTheme(id);
     if (!(await props.chooseCompany(id))) throw new Error("Couldn’t set up the company. Check your connection and try again.");
     chosenCompanyId.value = id;
     try {
-      await props.saveCompanyTheme(id, companyTheme.value);
+      if (!wasSetUp || companyTheme.value !== themeBefore) await props.saveCompanyTheme(id, companyTheme.value);
     } catch {
       // The company is set up; the colour can be chosen again in Settings. Do not hold the person here.
     }
@@ -144,8 +179,8 @@ async function leaveWelcome() {
   // The organization list loads right after sign-in; give it a moment before choosing the next screen.
   const deadline = performance.now() + 2000;
   while (props.organizationsLoading && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
-  const next: Stage = ownedOrganizations.value.length ? "company" : "agent";
-  if (next === "company") companyId.value = ownedOrganizations.value[0].github_org_id;
+  const next: Stage = ownedOrganizations.value.length || companyAccess.value ? "company" : "agent";
+  if (next === "company") companyId.value = ownedOrganizations.value[0]?.github_org_id ?? null;
   morphing.value = true;
   if (next === "agent") enterAgentStep(); else stage.value = "company";
   await nextTick();

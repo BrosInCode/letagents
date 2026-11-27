@@ -26,7 +26,19 @@
 
     <footer class="onb-bottom">
       <div class="onb-left">
-        <h1 ref="headingEl" class="onb-heading" tabindex="-1" data-morph="heading">Make {{ current?.login }} yours.</h1>
+        <h1 ref="headingEl" class="onb-heading" tabindex="-1" data-morph="heading">
+          {{ access === "signin" ? "Reconnect GitHub." : access ? "Find your company." : `Make ${current?.login} yours.` }}
+        </h1>
+        <template v-if="access">
+          <!-- GitHub has not let LetAgents see the person's organizations yet: one step on GitHub, then back here. -->
+          <p class="onb-note" data-morph="rise">
+            {{ access === "signin"
+              ? "GitHub no longer accepts this sign-in. Connect again on GitHub, then come back."
+              : "Allow LetAgents to see which GitHub organizations you belong to. It changes nothing on GitHub." }}
+          </p>
+          <p v-if="error" class="onb-feedback" role="alert">{{ error }}</p>
+        </template>
+        <template v-else>
         <!-- Only when the person owns more than one organization that is not set up yet. -->
         <div v-if="organizations.length > 1" class="orgs" role="radiogroup" aria-label="Organization" data-morph="rise">
           <button v-for="org in organizations" :key="org.github_org_id" type="button" class="org" role="radio"
@@ -45,10 +57,17 @@
         </div>
         <p class="onb-note" data-morph="rise">Everyone who joins {{ current?.login }} starts with this. They can change it later.</p>
         <p v-if="error" class="onb-feedback" role="alert">{{ error }}</p>
+        </template>
       </div>
       <div class="onb-actions">
         <button type="button" class="onb-quiet" data-morph="rise" :disabled="busy" data-testid="onboarding-company-later" @click="emit('skip')">Later</button>
-        <button type="button" class="onb-primary" data-morph="primary" :disabled="busy || !current" data-testid="onboarding-company-continue" @click="emit('continue')">
+        <button v-if="access" type="button" class="onb-primary" data-morph="primary" :disabled="busy" data-testid="onboarding-company-allow"
+          @click="accessOpened ? emit('retry') : emit('allow')">
+          <template v-if="busy"><LoaderCircle class="onb-spin" aria-hidden="true" /> Checking GitHub</template>
+          <template v-else-if="accessOpened">Check again <ArrowRight aria-hidden="true" /></template>
+          <template v-else>Open GitHub <ArrowUpRight aria-hidden="true" /></template>
+        </button>
+        <button v-else type="button" class="onb-primary" data-morph="primary" :disabled="busy || !current" data-testid="onboarding-company-continue" @click="emit('continue')">
           <template v-if="busy"><LoaderCircle class="onb-spin" aria-hidden="true" /> Setting up {{ current?.login }}</template>
           <template v-else>{{ error ? "Try again" : "Continue" }} <ArrowRight aria-hidden="true" /></template>
         </button>
@@ -59,16 +78,20 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { ArrowRight, Check, LoaderCircle } from "@lucide/vue";
+import { ArrowRight, ArrowUpRight, Check, LoaderCircle } from "@lucide/vue";
 import { roomThemePresets, type RoomThemeId } from "../../../../../../../shared/room-themes.mjs";
-import type { DesktopOrganization } from "../../../../../electron/ipc-types/organizations";
+import type { DesktopGitHubAccessReason, DesktopOrganization } from "../../../../../electron/ipc-types/organizations";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
 import { useFilmGrain } from "./useFilmGrain";
 import "./onboarding-step.css";
 
 const props = defineProps<{
-  /** Organizations the person owns that are not set up in LetAgents yet. */
+  /** Organizations the person owns (set up ones too: an owner can recolour them here). */
   organizations: DesktopOrganization[];
+  /** GitHub has not shared the person's organizations yet; null once it has. */
+  access?: DesktopGitHubAccessReason | null;
+  /** GitHub was opened for that access: the main button checks again. */
+  accessOpened?: boolean;
   organizationId: string | null;
   themeId: RoomThemeId;
   busy: boolean;
@@ -79,6 +102,8 @@ const emit = defineEmits<{
   "update:themeId": [id: RoomThemeId];
   continue: [];
   skip: [];
+  allow: [];
+  retry: [];
 }>();
 
 const grain = useFilmGrain();
