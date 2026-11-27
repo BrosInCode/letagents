@@ -356,7 +356,14 @@ export function useOnboardingAgents(options: OnboardingAgentsOptions) {
     });
   }
 
-  return { providers, loading, error, signInError, refresh, signIn, cancelSignIn, submitCode, openSignInLink, openInstall };
+  /** Check one agent again now, with a fresh shell environment (a click on an agent that could not be used). */
+  function recheck(id: DesktopAgentProviderId): Promise<void> {
+    if (!live()) return Promise.resolve();
+    patch(id, { state: "checking", detail: "Checking…" });
+    return check(id, { fresh: true, refreshEnvironment: true });
+  }
+
+  return { providers, loading, error, signInError, refresh, recheck, signIn, cancelSignIn, submitCode, openSignInLink, openInstall };
 }
 
 export type OnboardingAgents = ReturnType<typeof useOnboardingAgents>;

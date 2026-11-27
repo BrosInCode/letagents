@@ -20,7 +20,7 @@
         :setup-task="firstRoom.task.value" :setup-state="firstRoom.state.value" :setup-error="firstRoom.error.value"
         @select="selectedProviderId = $event" @sign-in="agents.signIn($event)" @cancel-sign-in="agents.cancelSignIn($event)"
         @open-link="agents.openSignInLink($event)" @submit-code="(id, code) => agents.submitCode(id, code)"
-        @install="agents.openInstall($event)" @start="startSetup" @retry="startSetup" @back="stage = 'agent'"
+        @install="agents.openInstall($event)" @recheck="agents.recheck($event)" @start="startSetup" @retry="startSetup" @back="stage = 'agent'"
         @skip="emit('finish')" />
     </Transition>
   </div>

@@ -63,6 +63,8 @@
           </section>
         </Transition>
         <p v-if="phase === 'pick' && (signInError || loadError)" class="onb-feedback" role="alert">{{ signInError || loadError }}</p>
+        <!-- An agent that can't be used says why, in place, and is checked again on each click. -->
+        <p v-else-if="phase === 'pick' && unavailableNote" class="onb-feedback" role="status" data-testid="onboarding-agent-unavailable">{{ unavailableNote }}</p>
 
         <ol v-if="phase === 'setup'" class="setup-steps" aria-live="polite" data-testid="onboarding-setup-steps">
           <li v-for="(item, index) in tasks" :key="item.id" :data-state="taskState(index)" :style="{ '--delay': `${index * 70}ms` }">
@@ -132,7 +134,7 @@ const props = defineProps<{
   setupError: string | null;
 }>();
 const emit = defineEmits<{
-  select: [id: string]; "sign-in": [id: string]; install: [id: string]; start: []; skip: []; back: []; retry: [];
+  select: [id: string]; "sign-in": [id: string]; install: [id: string]; recheck: [id: string]; start: []; skip: []; back: []; retry: [];
   "cancel-sign-in": [id: string]; "open-link": [id: string]; "submit-code": [id: string, code: string];
 }>();
 
@@ -170,9 +172,17 @@ const checking = computed(() => props.providers.some(provider => provider.state 
 const tiles = computed(() => props.phase === "setup"
   ? props.providers.filter(provider => provider.id === props.selectedId)
   : props.providers);
+// The reason shows for the agent last clicked while it stays unavailable.
+const noteFor = ref<string | null>(null);
+const unavailableNote = computed(() => {
+  const provider = props.providers.find(item => item.id === noteFor.value);
+  if (!provider) return null;
+  if (provider.state === "checking") return `Checking ${provider.name} again…`;
+  return provider.state === "unavailable" ? `${provider.name} can’t start yet: ${provider.detail}` : null;
+});
 const hintOf = (provider: OnboardingProvider) => ({
   ready: undefined, checking: "Checking this agent.", signin: "Needs sign-in. Click to sign in.",
-  "signing-in": "Finish signing in in your browser.", missing: "Not on this Mac. Click to get it.", unavailable: provider.detail,
+  "signing-in": "Finish signing in in your browser.", missing: "Not on this Mac. Click to get it.", unavailable: `${provider.detail} Click to check again.`,
 })[provider.state];
 const labelOf = (provider: OnboardingProvider) => provider.state === "ready" ? `${provider.name}, ready` : `${provider.name}. ${hintOf(provider) ?? ""}`;
 
@@ -203,6 +213,7 @@ function choose(provider: OnboardingProvider) {
   if (provider.state === "ready") emit("select", provider.id);
   else if (provider.state === "signin") emit("sign-in", provider.id);
   else if (provider.state === "missing") emit("install", provider.id);
+  else if (provider.state === "unavailable") { noteFor.value = provider.id; emit("recheck", provider.id); }
 }
 
 // ---- The scroll list: a small wheel. With more agents than fit, it loops (the list is drawn
@@ -356,7 +367,7 @@ defineExpose({ focusHeading: () => headingEl.value?.focus({ preventScroll: true 
   border-style: dashed; border-color: rgba(255, 255, 255, .1); background: transparent;
 }
 .provider-row:is([data-state="signin"], [data-state="missing"], [data-state="signing-in"], [data-state="checking"], [data-state="unavailable"]) :is(.provider-icon, strong) { opacity: .42; filter: grayscale(.6); }
-.provider-row:is([data-state="checking"], [data-state="unavailable"]) { cursor: default; }
+.provider-row[data-state="checking"] { cursor: default; }
 .pill-action { width: 17px; height: 17px; margin-left: auto; color: var(--ink-3); transition: color 160ms ease; }
 @media (hover: hover) and (pointer: fine) {
   .provider-row:is([data-state="signin"], [data-state="missing"]):hover .pill-action { color: var(--ink); }
