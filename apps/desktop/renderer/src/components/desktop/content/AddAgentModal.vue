@@ -223,7 +223,8 @@ const { dialogElement, openModelSettings, handleAfterLeave, handleDialogTab, han
 // The room's names can arrive while Brain is open. A name that became taken
 // goes back to Identity, where its warning shows, instead of starting.
 function startWithFreeName(): void {
-  if (identityError.value) { showStep('identity'); return; }
+  // A launch in progress or restored owns its name, and Identity is closed to it.
+  if (identityError.value && !supervisedUi.launch.view.value) { showStep('identity'); return; }
   void startManagedAgent();
 }
 </script>

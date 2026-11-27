@@ -30,7 +30,7 @@ function entry(overrides: Partial<DesktopSupervisorManifestEntry>): DesktopSuper
   return { id: "entry-1", roomId: ROOM, displayName: "Atlas", desiredState: "stopped", observedState: "stopped", ...overrides } as DesktopSupervisorManifestEntry;
 }
 
-test("people hold their display name and login; agents with a known state hold theirs; hidden people and history-only agents hold nothing", () => {
+test("people hold their display name and login; agents the room hears from hold theirs; hidden people and offline agents hold nothing", () => {
   const held = roomHeldNames({
     roomIdentifier: ROOM,
     participants: [
@@ -46,7 +46,6 @@ test("people hold their display name and login; agents with a known state hold t
   assert.deepEqual(held, [
     { name: "Emmy May", holder: "person" },
     { name: "EmmyMay", holder: "person" },
-    { name: "OldHelper", holder: "agent" },
     { name: "Scout", holder: "agent" },
   ]);
 });

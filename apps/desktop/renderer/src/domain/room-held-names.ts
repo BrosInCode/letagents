@@ -17,8 +17,7 @@ export interface RoomHeldName {
  * - People: every visible person, by display name and GitHub login.
  * - Agents: every agent saved on this computer for the room, in any state,
  *   because a saved agent keeps its name while it is stopped; and every
- *   agent in the room with a known state, online or offline. An agent row
- *   with no state at all is message history only.
+ *   agent another computer runs that is live or recently seen.
  */
 export function roomHeldNames(input: {
   roomIdentifier: string | null | undefined;
@@ -33,9 +32,11 @@ export function roomHeldNames(input: {
     if (participant.kind === "human") {
       held.push({ name: participant.displayName, holder: "person" });
       if (participant.githubLogin) held.push({ name: participant.githubLogin, holder: "person" });
-    } else if (participant.activityState) {
-      // Offline agents count too: the room keeps a durable agent's name
-      // while it is away, and a name people still see is a confusing one.
+    } else if (participant.activityState === "active" || participant.activityState === "away") {
+      // The room marks every agent it is not hearing from as offline, from
+      // a durable worker that keeps its name to a one-off agent that left
+      // months ago. This window cannot tell them apart, so it holds only
+      // agents it hears from; the room still decides the rest on join.
       held.push({ name: participant.displayName, holder: "agent" });
     }
   }
