@@ -115,8 +115,10 @@ export function resolveProviderSignInPlan(
   }
   const cli = providerCli(providerId, provider.runtimeCommand, options.base);
   if (providerId === "codex") {
+    // The browser sign-in, answered on localhost: device-code sign-in is off
+    // by default in ChatGPT's security settings, so many accounts refuse it.
     return {
-      mode: "process", providerName, command: cli.command, args: ["login", "--device-auth"], env: cli.env,
+      mode: "process", providerName, command: cli.command, args: ["login"], env: cli.env,
       verify: async () => (await runStatusCheck(cli.command, ["login", "status"], cli.env)).ok,
     };
   }

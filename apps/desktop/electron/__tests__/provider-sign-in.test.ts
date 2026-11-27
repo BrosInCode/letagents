@@ -98,6 +98,20 @@ test("sign-in output parsing finds the link, the device code and the paste promp
   assert.equal(codex.code, "37UV-E7QNH");
   assert.equal(codex.acceptsCode, false);
 
+  // `codex login` (the browser sign-in the app runs): the local callback is
+  // http, so the first https link is the sign-in page, and there is no code.
+  const codexBrowser = parseSignInOutput([
+    "Starting local login server on http://localhost:1455.",
+    "If your browser did not open, navigate to this URL to authenticate:",
+    "",
+    "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_X&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&state=ABCD-EFGHI",
+    "",
+    "On a remote or headless machine? Use `codex login --device-auth` instead.",
+  ].join("\n"));
+  assert.match(codexBrowser.url ?? "", /^https:\/\/auth\.openai\.com\/oauth\/authorize\?response_type=code&/);
+  assert.equal(codexBrowser.code, null);
+  assert.equal(codexBrowser.acceptsCode, false);
+
   const claude = parseSignInOutput([
     "Opening browser to sign in…",
     "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&state=ABCD-EFGHI&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback",
@@ -254,7 +268,7 @@ test("sign-in runs each provider's program in the environment its preflight uses
     CURSOR_API_KEY: "must-not-pass",
   };
   const expected: Record<string, { args: string[] }> = {
-    codex: { args: ["login", "--device-auth"] },
+    codex: { args: ["login"] },
     "claude-code": { args: ["auth", "login"] },
     cursor: { args: ["login"] },
   };
