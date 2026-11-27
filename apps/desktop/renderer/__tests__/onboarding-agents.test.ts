@@ -264,6 +264,7 @@ test("three fast sign-in clicks leave one sign-in, and no row stuck on Signing i
 test("an unavailable agent's note never names the agent twice", () => {
   assert.equal(onboardingUnavailableText("Claude Code", "Update it to 2.1."), "Claude Code can't start yet: Update it to 2.1.");
   assert.equal(onboardingUnavailableText("Claude Code", "Couldn't check Claude Code: timed out"), "Couldn't check Claude Code: timed out");
+  assert.match(onboardingUnavailableText("Cursor", "Choose a local repository before starting Cursor."), /^Cursor works inside a project folder\./);
   assert.equal(onboardingUnavailableText("Cursor", "Cursor needs an update."), "Cursor needs an update.");
   assert.equal(onboardingUnavailableText("Cursor", ""), "Cursor can't start yet.");
 });

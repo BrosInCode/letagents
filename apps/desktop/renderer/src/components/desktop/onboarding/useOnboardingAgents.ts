@@ -82,6 +82,10 @@ export function onboardingStateFromPreflight(
 export function onboardingUnavailableText(name: string, detail: string): string {
   const reason = detail.trim();
   if (!reason) return `${name} can't start yet.`;
+  // The first room has no project folder, so an agent that works only in a repository can't be the first one.
+  if (/local repository|choose a (project|repository)|project folder/i.test(reason)) {
+    return `${name} works inside a project folder. Pick another agent now, and add ${name} later from a project room.`;
+  }
   if (/^(couldn['’]t|could not|can['’]t|cannot)\b/i.test(reason) || reason.toLowerCase().includes(name.toLowerCase())) return reason;
   return `${name} can't start yet: ${reason}`;
 }

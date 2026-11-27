@@ -174,6 +174,8 @@ const tiles = computed(() => props.phase === "setup"
   : props.providers);
 // The reason shows for the agent last clicked while it stays unavailable.
 const noteFor = ref<string | null>(null);
+// A selection made another way (keyboard, a sign-in that finished) clears the note too.
+watch(() => props.selectedId, (id) => { if (id && id !== noteFor.value) noteFor.value = null; });
 const unavailableNote = computed(() => {
   const provider = props.providers.find(item => item.id === noteFor.value);
   if (!provider) return null;
@@ -211,6 +213,8 @@ function primary() {
 }
 function choose(provider: OnboardingProvider) {
   if (props.phase !== "pick") return;
+  // The note belongs to the agent last clicked; any other choice clears it.
+  if (provider.state !== "unavailable") noteFor.value = null;
   if (provider.state === "ready") emit("select", provider.id);
   else if (provider.state === "signin") emit("sign-in", provider.id);
   else if (provider.state === "missing") emit("install", provider.id);
