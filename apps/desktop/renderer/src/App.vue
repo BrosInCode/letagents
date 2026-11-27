@@ -530,6 +530,7 @@ import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAler
 import { useAppMessageNotifications } from "./composables/app/useAppMessageNotifications";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
+import { markFirstRoomTour } from "./domain/first-room-tour";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -769,6 +770,7 @@ const usedRoomFlight = ref(false);
 const arrivalSidebarEdge = ref("0px");
 
 async function openOnboardingRoom(id: string, icon?: HTMLElement) {
+  markFirstRoomTour(id);
   const flight = prepareFirstRoomFlight(icon, edge => {
     arrivalSidebarEdge.value = `${edge}px`;
     roomArrival.value = "moving";
