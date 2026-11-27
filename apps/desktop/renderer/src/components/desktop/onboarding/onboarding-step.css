@@ -19,7 +19,8 @@
   display: flex; align-items: center; gap: 8px; min-height: 36px; font-weight: 640;
 }
 html[data-window-chrome="mac"] .onb-brand { top: 42px; }
-.onb-brand svg { width: 24px; height: 24px; }
+/* The logo fills its box; the box sets the size. */
+.onb-brand-mark { display: block; width: 24px; height: 24px; flex: 0 0 24px; }
 
 .onb-bottom {
   grid-row: 2; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 32px;

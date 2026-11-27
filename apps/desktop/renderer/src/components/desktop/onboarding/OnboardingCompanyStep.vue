@@ -2,7 +2,7 @@
   <article class="onb-step company-step" data-testid="onboarding-company-step" :style="{ '--accent': accent }" :aria-busy="busy">
     <div class="onb-grain" :style="{ backgroundImage: grain }" aria-hidden="true" />
     <div class="onb-drag" aria-hidden="true" />
-    <span class="onb-brand" data-morph="brand"><LetAgentsLogoMark aria-hidden="true" />LetAgents</span>
+    <span class="onb-brand" data-morph="brand"><span class="onb-brand-mark"><LetAgentsLogoMark aria-hidden="true" /></span>LetAgents</span>
 
     <!-- A small live room in the chosen colour: the one thing worth looking at on this screen. -->
     <section class="company-stage" aria-hidden="true">

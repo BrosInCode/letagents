@@ -2,7 +2,7 @@
   <article class="onb-step agent-step" :data-phase="phase" data-testid="onboarding-agent-step" :style="accent ? { '--mint': accent } : undefined">
     <div class="onb-grain" :style="{ backgroundImage: grain }" aria-hidden="true" />
     <div class="onb-drag" aria-hidden="true" />
-    <span class="onb-brand" data-morph="brand"><LetAgentsLogoMark aria-hidden="true" />LetAgents</span>
+    <span class="onb-brand" data-morph="brand"><span class="onb-brand-mark"><LetAgentsLogoMark aria-hidden="true" /></span>LetAgents</span>
 
     <!-- The choice sits with the heading, like a line of a sentence; the rest of the screen stays quiet. -->
     <footer class="onb-bottom">
