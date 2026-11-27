@@ -11,7 +11,11 @@ test("a surface colour token picks its texture group", () => {
   assert.equal(surfaceGroup("color-mix(in srgb, var(--blue) 5%, var(--bg-elevated))"), "menus");
 });
 
-test("translucent, layered and see-through paint gets no grain", () => {
+test("a see-through surface colour still gets the grain", () => {
+  assert.equal(surfaceGroup("color-mix(in srgb, var(--bg-elevated) 86%, transparent)"), "menus");
+});
+
+test("tints, layered paint and the see-through room canvas get no grain", () => {
   assert.equal(surfaceGroup("transparent"), null);
   assert.equal(surfaceGroup("rgba(255, 255, 255, 0.05)", ".desktop-context-menu"), null);
   assert.equal(surfaceGroup("color-mix(in srgb, var(--text) 10%, transparent)"), null);

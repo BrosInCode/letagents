@@ -11,9 +11,12 @@ import type { Declaration, Plugin } from "postcss";
  * person turns that group on (Settings → Styling); otherwise it is unset and
  * the image is `none`. A new component that uses the tokens is covered too.
  *
- * Left alone: translucent paint (it would double the grain under it),
- * gradients and images, several layers, and the room theme's canvas and
- * sidebar, which app-texture.css makes see-through.
+ * See-through surfaces count too, such as a menu that mixes --bg-elevated
+ * with transparent and blurs what is behind it: "All" means every surface.
+ * Left alone: tints with no surface token (hover and selection overlays on a
+ * surface that already has the grain), gradients and images, several layers,
+ * and the room theme's canvas and sidebar, which app-texture.css makes
+ * see-through.
  */
 export const SURFACE_TOKEN_GROUPS: Readonly<Record<string, string>> = {
   "--bg": "background",
@@ -44,7 +47,7 @@ const FIXED_OPAQUE = /^(#[\da-f]{3}|#[\da-f]{6}|light-dark\(\s*#[\da-f]{3,6}\s*,
 const FLOATING_SELECTOR = /menu|popover|dialog|modal|toast|tooltip|dropdown|picker|sheet/i;
 
 const SEE_THROUGH_TOKENS = new Set(["--workspace-canvas", "--workspace-sidebar"]);
-const SKIP_VALUE = /transparent|gradient\(|url\(|image-set\(|rgba\(|hsla\(|\/\s*0?\.\d/i;
+const SKIP_VALUE = /gradient\(|url\(|image-set\(/i;
 const SKIP_SELECTOR = /::(-webkit-|selection|placeholder|backdrop|marker)/;
 
 /** The group that paints this value, or null when it is not a plain surface. */
