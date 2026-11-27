@@ -1,7 +1,7 @@
 <template>
   <section ref="root" class="welcome" :data-skipped="skipped" :data-fallback="fallback" :style="markStyle"
-    aria-labelledby="welcome-title" @pointerdown="skip" @keydown="skip" @pointermove="onPointerMove">
-    <canvas v-if="!fallback" :key="runId" ref="sceneCanvas" class="welcome-scene" :data-veiled="veiled" aria-hidden="true" />
+    aria-labelledby="welcome-title" @pointerdown="onPress" @keydown="onPress" @pointermove="ink.stir">
+    <canvas v-if="!fallback" ref="sceneCanvas" class="welcome-scene" :data-veiled="veiled" aria-hidden="true" />
     <div v-else class="welcome-mark" aria-hidden="true">
       <svg viewBox="-12 -12 152 152">
         <defs>
@@ -52,9 +52,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import DesktopPlatformIcon from './DesktopPlatformIcon.vue'
-import { createInkScene, type InkScene } from './ink-scene'
+import { useInkScene, type InkMarkPlacement } from '../../../../../shared/ui/ink/useInkScene'
 import {
   desktopDownloadOffer,
   detectDesktopVisitorPlatform,
@@ -74,64 +74,17 @@ const downloadLinks = computed(() => {
   })
 })
 
-// ---- The ink scene: plays the opening once, then rests. It wakes only when the visitor
-// stirs it with the pointer or presses a button, so an idle page does no GPU work.
+// ---- The ink scene (shared with the desktop onboarding): plays the opening once, then rests.
+// It wakes only when the visitor stirs it with the pointer or presses a download, so an idle
+// page does no GPU work. The shared driver holds the performance guards.
 const root = ref<HTMLElement | null>(null)
 const copy = ref<HTMLElement | null>(null)
 const sceneCanvas = ref<HTMLCanvasElement | null>(null)
-const fallback = ref(false)
-const skipped = ref(false)
-const runId = ref(0)
 const grain = ref('')
 const markStyle = ref<Record<string, string>>({})
-// Hidden while a whole opening is simulated in slices (reduced motion, a rebuild), then faded in.
-const veiled = ref(false)
-// A device that cannot hold the opening near 60 fps gets no extra ink work (stirring, pulses).
-let struggling = false
-const frameTimes: number[] = []
-let lastFrame = 0
-let reduced = false
-let scene: InkScene | null = null
-let frame = 0
-let liveFrame = 0
-let liveRunning = false
-let startedAt = 0
-let observer: ResizeObserver | undefined
-// The grids are sized to the canvas shape when the scene is made. A later change of shape
-// would stretch the ink (a wider window makes a fat mark), so the scene is made again.
-let sceneShape = 0
-let sceneWidth = 0
-let rebuildTimer: ReturnType<typeof setTimeout> | undefined
-
-function openingTime(now = performance.now()) {
-  if (!scene) return 0
-  if (reduced) return scene.end
-  return startedAt ? Math.min((now - startedAt) / 1000, scene.end) : 0
-}
-
-// One loop drives the opening. It ends once the opening has been simulated to its end;
-// after that the page draws only when the visitor stirs the ink or presses a download.
-function tick(now: number) {
-  if (!scene) return
-  // The clock starts on the first drawn frame, as CSS animations do.
-  if (!startedAt) startedAt = now
-  const t = openingTime(now)
-  const caughtUp = scene.render(t)
-  if (caughtUp && !veiled.value && t < scene.end && lastFrame) frameTimes.push(now - lastFrame)
-  lastFrame = now
-  if (caughtUp && veiled.value) veiled.value = false
-  if (t < scene.end || !caughtUp) { frame = requestAnimationFrame(tick); return }
-  const sorted = frameTimes.slice().sort((a, b) => a - b)
-  struggling = sorted.length > 30 && sorted[Math.floor(sorted.length / 2)] > 24
-}
-function runOpening() {
-  cancelAnimationFrame(frame)
-  lastFrame = 0
-  frame = requestAnimationFrame(tick)
-}
 
 // The mark forms in the free space between the navigation bar and the copy.
-function placeMark(): { center: [number, number]; height: number } {
+function placeMark(): InkMarkPlacement {
   const section = root.value?.getBoundingClientRect()
   const copyTop = copy.value?.getBoundingClientRect().top
   if (!section || copyTop === undefined || !section.height) return { center: [.5, .66], height: .3 }
@@ -144,132 +97,18 @@ function placeMark(): { center: [number, number]; height: number } {
   return { center: [.5, 1 - middle / section.height], height }
 }
 
-async function play() {
-  cancelAnimationFrame(frame)
-  cancelAnimationFrame(liveFrame)
-  liveRunning = false
-  scene?.dispose(true)
-  scene = null
-  runId.value++
-  await nextTick()
-  const canvas = sceneCanvas.value
-  if (!canvas) return
-  scene = build(canvas)
-  if (!scene) { fallback.value = true; return }
-  canvas.addEventListener('webglcontextlost', onContextLost, { once: true })
-  observer?.observe(canvas)
-  startedAt = 0
-  // Reduced motion: no opening to watch; the formed mark fades in once it is ready.
-  veiled.value = reduced
-  runOpening()
+const ink = useInkScene({ canvas: sceneCanvas, placeMark })
+const { fallback, veiled, skipped } = ink
+
+// A first look should never hold anyone up: a press anywhere but a link finishes the scene.
+function onPress(event: Event) {
+  if ((event.target as HTMLElement).closest('button, a')) return
+  ink.skip()
 }
 
-function canvasShape(canvas: HTMLCanvasElement) {
-  const box = canvas.getBoundingClientRect()
-  return box.height ? box.width / box.height : 0
-}
-
-function build(canvas: HTMLCanvasElement): InkScene | null {
-  const mark = placeMark()
-  let made: InkScene | null = null
-  try {
-    const light = matchMedia('(max-width: 760px), (pointer: coarse)').matches
-    made = createInkScene(canvas, { light, markCenter: mark.center, markHeight: mark.height })
-  } catch (error) {
-    console.error(error)
-  }
-  sceneShape = canvasShape(canvas)
-  sceneWidth = canvas.getBoundingClientRect().width
-  return made
-}
-
-// Make the scene again for the new shape. The fixed time step draws the same picture for the
-// same time, so it is simulated again (in slices, hidden) up to the same moment.
-function rebuild() {
-  const canvas = sceneCanvas.value
-  if (!scene || !canvas) return
-  cancelAnimationFrame(liveFrame)
-  liveRunning = false
-  scene.dispose()
-  scene = build(canvas)
-  if (!scene) { cancelAnimationFrame(frame); fallback.value = true; return }
-  veiled.value = true
-  runOpening()
-}
-
-function onResize() {
-  const canvas = sceneCanvas.value
-  if (!scene || !canvas) return
-  scene.resize()
-  const box = canvas.getBoundingClientRect()
-  if (!box.height || !sceneShape || !sceneWidth) return
-  const shapeChange = Math.abs(box.width / box.height / sceneShape - 1)
-  const widthChange = Math.abs(box.width / sceneWidth - 1)
-  // A phone's address bar changes only the height, by a little: a slight stretch is not worth
-  // simulating the whole opening again. A new width (a window resized, a phone turned) is.
-  if (!(widthChange > .02 && shapeChange > .02) && shapeChange < .15) return
-  clearTimeout(rebuildTimer)
-  rebuildTimer = setTimeout(rebuild, 180)
-}
-
-function onContextLost(event: Event) {
-  event.preventDefault()
-  cancelAnimationFrame(frame)
-  cancelAnimationFrame(liveFrame)
-  liveRunning = false
-  scene = null
-  fallback.value = true
-}
-
-// A first look should never hold anyone up: any press finishes the scene.
-function skip(event: Event) {
-  if (skipped.value || !scene || (event.target as HTMLElement).closest('button, a')) return
-  const now = performance.now()
-  if (startedAt && (now - startedAt) / 1000 >= scene.end) return
-  skipped.value = true
-  // Catch up to the formed mark in slices: a quick fast-forward, never one long GPU stall.
-  startedAt = now - scene.end * 1000
-  runOpening()
-}
-
-function liveLoop(now: number) {
-  if (!scene) { liveRunning = false; return }
-  liveRunning = scene.live(now)
-  if (liveRunning) liveFrame = requestAnimationFrame(liveLoop)
-}
-function wake() {
-  if (liveRunning) return
-  liveRunning = true
-  liveFrame = requestAnimationFrame(liveLoop)
-}
-
-// The visitor is the warm ink: a mouse moving over the water leaves a trail. Touch scrolls instead.
-let lastPointer: { x: number; y: number } | null = null
-function onPointerMove(event: PointerEvent) {
-  if (!scene || reduced || struggling || event.pointerType !== 'mouse' || !scene.ready()) return
-  const box = sceneCanvas.value?.getBoundingClientRect()
-  if (!box?.width) return
-  const x = (event.clientX - box.left) / box.width
-  const y = 1 - (event.clientY - box.top) / box.height
-  const previous = lastPointer
-  lastPointer = { x, y }
-  if (!previous) return
-  const dx = x - previous.x, dy = y - previous.y
-  if (Math.abs(dx) + Math.abs(dy) < .0015) return
-  scene.stir(x, y, dx, dy)
-  wake()
-}
-
+// The agent answers a download press: a ring from the dot, and mint ink streams toward the button.
 function onDownload(event: MouseEvent) {
-  if (!scene || reduced || struggling || !scene.ready()) return
-  // The agent answers the press: a ring from the dot, and mint ink streams toward the button.
-  const box = sceneCanvas.value?.getBoundingClientRect()
-  const button = (event.currentTarget as HTMLElement).getBoundingClientRect()
-  if (!box?.width) return
-  scene.pulse((button.left + button.width / 2 - box.left) / box.width, 1 - (button.top - box.top) / box.height)
-  cancelAnimationFrame(liveFrame)
-  liveRunning = false
-  wake()
+  ink.pulseToward(event.currentTarget as HTMLElement)
 }
 
 function makeGrain() {
@@ -292,20 +131,7 @@ onMounted(() => {
   void fetchCurrentMacDesktopBeta()
     .then((release) => { macDesktopBeta.value = release })
     .catch(() => { /* Keep the bundled fallback. */ })
-  reduced = matchMedia('(prefers-reduced-motion: reduce)').matches
   makeGrain()
-  observer = new ResizeObserver(onResize)
-  void play()
-})
-
-onUnmounted(() => {
-  clearTimeout(rebuildTimer)
-  cancelAnimationFrame(frame)
-  cancelAnimationFrame(liveFrame)
-  observer?.disconnect()
-  // Leaving the landing view: give the WebGL context back now instead of at garbage collection.
-  scene?.dispose(true)
-  scene = null
 })
 </script>
 
