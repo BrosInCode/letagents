@@ -2,7 +2,7 @@
   <dialog ref="dialog" class="room-guide" aria-label="Quick tour" data-testid="room-guided-tour" @close="stop" @cancel.prevent="finish">
     <!-- One 2D canvas: a dim layer with an opening on the part being shown, and the strings shot to it. -->
     <canvas ref="canvas" class="room-guide-canvas" aria-hidden="true" @click="advance" />
-    <section ref="card" class="room-guide-card" :style="cardStyle">
+    <section ref="card" class="room-guide-card" :style="cardStyle" @pointerenter="holdWelcome" @focusin="onCardFocus">
       <div class="room-guide-text" aria-live="polite">
         <Transition name="guide-example" mode="out-in">
           <div v-if="welcomeShown" key="welcome" class="room-guide-example" data-testid="room-guide-welcome">
@@ -32,8 +32,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onDeactivated, onUnmounted, ref, shallowRef, watch } from "vue";
-import { takeFirstRoomTour } from "../../../../domain/first-room-tour";
+import { computed, nextTick, onActivated, onDeactivated, onUnmounted, ref, shallowRef, watch } from "vue";
+import { hasFirstRoomTour, takeFirstRoomTour } from "../../../../domain/first-room-tour";
 
 const props = defineProps<{ roomIdentifier?: string | null; roomLoading?: boolean; viewerName?: string | null }>();
 
@@ -69,7 +69,8 @@ type Strand = {
   alpha: number; state: "shooting" | "held" | "released"; t0: number; seg: number;
 };
 let strands: Strand[] = [];
-let shootAt = 0, landedAt = 0, frame = 0, lastTick = 0, welcomeTimer = 0;
+let shootAt = 0, landedAt = 0, frame = 0, lastTick = 0, welcomeTimer = 0, skipFrame = false;
+let settleObserver: ResizeObserver | null = null, settleFrame = 0;
 let ctx: CanvasRenderingContext2D | null = null;
 let accent = "#a8dec7";
 
@@ -275,15 +276,23 @@ function settleNow(now: number) {
   draw(now);
 }
 
+/** Strings held and the opening fully open: only a slow sway is left, so half the frames are enough. */
+function resting(now: number) {
+  return !shootAt && landedAt > 0 && now - landedAt >= OPEN_MS && strands.length > 0 && strands.every(strand => strand.state === "held");
+}
 function tick(now: number) {
   frame = 0;
   if (!dialog.value?.open || document.hidden) return;  // a hidden window costs nothing; visibilitychange resumes
   if (shootAt && now >= shootAt) { shootAt = 0; shoot(now); }
-  const dt = Math.min(1 / 30, lastTick ? (now - lastTick) / 1000 : 1 / 60);
-  lastTick = now;
-  simulate(now, dt / 2);
-  simulate(now, dt / 2);
-  draw(now);
+  // At rest, every other frame is skipped (about 30 fps); shooting and letting go run every frame.
+  skipFrame = resting(now) && !skipFrame;
+  if (!skipFrame) {
+    const dt = Math.min(1 / 30, lastTick ? (now - lastTick) / 1000 : 1 / 60);
+    lastTick = now;
+    simulate(now, dt / 2);
+    simulate(now, dt / 2);
+    draw(now);
+  }
   frame = requestAnimationFrame(tick);
 }
 function run() {
@@ -293,18 +302,50 @@ function run() {
   frame = requestAnimationFrame(tick);
 }
 function onVisibility() { if (!document.hidden && dialog.value?.open) run(); }
-function onResize() { placeCard(); if (reducedMotion()) { strands = []; settleNow(performance.now()); } else run(); }
+function resettle() { strands = []; settleNow(performance.now()); }
+function onResize() { placeCard(); if (reducedMotion()) resettle(); else run(); }
+/**
+ * Reduced motion draws once, so a part that moves later (the sidebar, a late layout) would leave
+ * the opening behind. Watch the part and the room, and settle again on the next frame.
+ */
+function watchTargetForReducedMotion() {
+  settleObserver?.disconnect();
+  settleObserver = null;
+  if (!reducedMotion() || welcomeShown.value || typeof ResizeObserver !== "function") return;
+  const target = [...document.querySelectorAll<HTMLElement>(step.value.selector)]
+    .find(element => !element.closest('[inert], [hidden], [aria-hidden="true"]'));
+  const room = dialog.value?.closest<HTMLElement>(".desktop-room-shell");
+  settleObserver = new ResizeObserver(() => {
+    cancelAnimationFrame(settleFrame);
+    settleFrame = requestAnimationFrame(() => { if (dialog.value?.open) resettle(); });
+  });
+  for (const element of [target, room]) if (element) settleObserver.observe(element);
+}
 function onContextRestored() { readAccent(); run(); }
 
+/** The parts on screen now. Read again on leaving the welcome: parts may appear after the tour opens. */
+function readSteps() {
+  const visible = steps.filter(item => visibleTarget(item.selector));
+  availableSteps.value = visible.length ? visible : [steps[1]];
+}
 function showStep(next: number) {
   const now = performance.now();
+  window.clearTimeout(welcomeTimer);
+  if (welcomeShown.value && next === 0) readSteps();
   welcomeShown.value = false;
   index.value = next;
   releaseStrands(now);
   landedAt = 0;
-  if (reducedMotion()) { strands = []; void nextTick(() => settleNow(performance.now())); return; }
+  if (reducedMotion()) {
+    strands = [];
+    void nextTick(() => { settleNow(performance.now()); watchTargetForReducedMotion(); });
+    return;
+  }
   shootAt = now + SHOOT_DELAY_MS;
 }
+/** The welcome moves on by itself, unless the person is reading it (pointer or focus in the card). */
+function holdWelcome() { window.clearTimeout(welcomeTimer); }
+function onCardFocus(event: FocusEvent) { if (event.target !== nextButton.value) holdWelcome(); }
 function advance() {
   window.clearTimeout(welcomeTimer);
   if (welcomeShown.value) return showStep(0);
@@ -321,7 +362,7 @@ function onKey(event: KeyboardEvent) {
  * then moves on by itself unless the person moves first.
  */
 async function open(options: { welcome?: { name?: string | null } } = {}) {
-  if (!dialog.value || dialog.value.open) return;
+  if (!dialog.value?.isConnected || dialog.value.open) return;
   const visible = steps.filter(item => visibleTarget(item.selector));
   if (!visible.length && !options.welcome) return;
   availableSteps.value = visible.length ? visible : [steps[1]];
@@ -340,9 +381,13 @@ async function open(options: { welcome?: { name?: string | null } } = {}) {
   placeCard();
   nextButton.value?.focus();
   if (welcomeShown.value) {
-    welcomeTimer = window.setTimeout(() => { if (welcomeShown.value && dialog.value?.open) showStep(0); }, WELCOME_MS);
+    // Under reduced motion nothing changes by itself: the person moves on with the button.
+    if (!reducedMotion()) {
+      welcomeTimer = window.setTimeout(() => { if (welcomeShown.value && dialog.value?.open) showStep(0); }, WELCOME_MS);
+    }
   } else if (reducedMotion()) {
     settleNow(performance.now());
+    watchTargetForReducedMotion();
   } else {
     shootAt = performance.now() + 240;
   }
@@ -354,6 +399,8 @@ function stop() {
   cancelAnimationFrame(frame);
   frame = 0;
   window.clearTimeout(welcomeTimer);
+  settleObserver?.disconnect(); settleObserver = null;
+  cancelAnimationFrame(settleFrame);
   strands = []; shootAt = 0; landedAt = 0;
   removeEventListener("resize", onResize);
   removeEventListener("keydown", onKey);
@@ -363,14 +410,24 @@ function stop() {
 function close() { dialog.value?.close(); }
 // The first room after onboarding: once it is ready, say what LetAgents is, then show the room around.
 let firstTourTimer = 0;
-watch([() => props.roomIdentifier, () => props.roomLoading], ([identifier, loading]) => {
-  if (loading || !takeFirstRoomTour(identifier)) return;
+/** Another modal (a company invite, say) is open: the tour waits for it instead of opening on top. */
+const otherModalOpen = () => [...document.querySelectorAll('dialog[open], [role="dialog"][aria-modal="true"]')]
+  .some(element => element !== dialog.value);
+function tryFirstTour(delay: number) {
   window.clearTimeout(firstTourTimer);
+  if (props.roomLoading || !hasFirstRoomTour(props.roomIdentifier)) return;
   // Let the room's arrival and first paint settle before the tour dims it.
-  firstTourTimer = window.setTimeout(() => { void open({ welcome: { name: props.viewerName } }); }, 900);
-}, { immediate: true });
+  firstTourTimer = window.setTimeout(() => {
+    // The mark is used only when the tour can open: on the page, the window shown, nothing else on top.
+    if (!dialog.value?.isConnected || document.hidden || otherModalOpen()) { tryFirstTour(700); return; }
+    if (!takeFirstRoomTour(props.roomIdentifier)) return;
+    void open({ welcome: { name: props.viewerName } });
+  }, delay);
+}
+watch([() => props.roomIdentifier, () => props.roomLoading], () => tryFirstTour(900), { immediate: true });
 
-onDeactivated(close);
+onActivated(() => tryFirstTour(900));
+onDeactivated(() => { window.clearTimeout(firstTourTimer); close(); });
 onUnmounted(() => { stop(); window.clearTimeout(firstTourTimer); });
 defineExpose({ open, close });
 </script>

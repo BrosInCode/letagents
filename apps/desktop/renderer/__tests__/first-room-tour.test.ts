@@ -7,7 +7,7 @@ const store = new Map<string, string>();
   setItem: (key: string, value: string) => { store.set(key, value); },
   removeItem: (key: string) => { store.delete(key); },
 };
-const { markFirstRoomTour, takeFirstRoomTour } = await import("../src/domain/first-room-tour");
+const { hasFirstRoomTour, markFirstRoomTour, takeFirstRoomTour } = await import("../src/domain/first-room-tour");
 
 beforeEach(() => store.clear());
 
@@ -26,4 +26,12 @@ test("no mark, no room, or blocked storage never opens the tour", () => {
   assert.doesNotThrow(() => markFirstRoomTour("welcome_abc"));
   assert.equal(takeFirstRoomTour("welcome_abc"), false);
   (globalThis as { localStorage?: unknown }).localStorage = saved;
+});
+
+test("looking at the mark does not use it up", () => {
+  markFirstRoomTour("welcome_abc");
+  assert.equal(hasFirstRoomTour("Welcome_ABC"), true);
+  assert.equal(hasFirstRoomTour("another_room"), false);
+  assert.equal(takeFirstRoomTour("welcome_abc"), true, "the tour still takes it once it opens");
+  assert.equal(hasFirstRoomTour("welcome_abc"), false);
 });

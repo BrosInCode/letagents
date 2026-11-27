@@ -14,6 +14,16 @@ export function markFirstRoomTour(roomIdentifier: string): void {
   try { localStorage.setItem(KEY, id); } catch { /* storage full or blocked: no tour, nothing else breaks */ }
 }
 
+/** Whether the room carries the mark, without using it up (the tour takes it once it can open). */
+export function hasFirstRoomTour(roomIdentifier: string | null | undefined): boolean {
+  const id = normalizeRoomIdentifier(roomIdentifier);
+  try {
+    return Boolean(id) && localStorage.getItem(KEY) === id;
+  } catch {
+    return false;
+  }
+}
+
 /** True once for the marked room; the mark is removed. */
 export function takeFirstRoomTour(roomIdentifier: string | null | undefined): boolean {
   const id = normalizeRoomIdentifier(roomIdentifier);
