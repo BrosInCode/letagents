@@ -197,11 +197,20 @@ function resizeCanvas(): number {
   if (element.width !== width || element.height !== height) { element.width = width; element.height = height; }
   return ratio;
 }
+/**
+ * The rope takes the room's accent, which follows the company's theme. The variable is a
+ * light-dark() pair the canvas cannot read, so a hidden probe lets the browser resolve it
+ * to one rgb() colour for the current appearance first.
+ */
 function readAccent() {
-  const value = dialog.value ? getComputedStyle(dialog.value).getPropertyValue("--workspace-accent").trim() : "";
-  if (!value || !ctx) return;
+  if (!ctx || !dialog.value) return;
+  const probe = document.createElement("span");
+  probe.style.cssText = "position:absolute;width:0;height:0;color:var(--workspace-accent, #a8dec7)";
+  dialog.value.append(probe);
+  const resolved = getComputedStyle(probe).color;
+  probe.remove();
   ctx.fillStyle = "#a8dec7";
-  ctx.fillStyle = value;  // the canvas normalizes any CSS colour, or keeps the last valid one
+  if (resolved) ctx.fillStyle = resolved;  // the canvas keeps the last valid colour if this one is not
   accent = String(ctx.fillStyle);
 }
 function withAlpha(color: string, alpha: number) {
