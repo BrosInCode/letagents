@@ -3,38 +3,29 @@ import { readFile } from "node:fs/promises";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  computed,
   createSSRApp,
   h,
+  ref,
   type Component,
 } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 
 let vite: ViteDevServer;
-let AddAgentSetupStatus: Component;
+let AddAgentSignIn: Component;
 
 const longSignInCommand = "env -i HOME='/Users/example/.letagents/home' CODEX_HOME='/Users/example/.codex' PATH='/usr/bin:/bin' claude auth login --scope full-length-example";
 
-const setupProps = {
-  providerName: "Claude",
-  preflight: { status: "auth_required", nextAction: "authenticate" },
-  loading: false,
-  statusTitle: "Sign in to Claude",
-  statusDescription: "Sign in to your agent app, then check again.",
-  runtimeLabel: "Claude Code",
-  bridgeLabel: "Connected",
-  repoLabel: "Ready",
-  showSecureStorage: false,
-  secureStorageLabel: null,
-  secureStorageNeedsAttention: false,
-  canOpenSecureStorage: false,
-  showWorktrees: false,
-  worktrees: [],
-  worktreeDescription: "",
-  authCommand: longSignInCommand,
-  installCommand: null,
-  error: null,
+// In-app sign-in (#2141) replaced the sign-in command box; the command stays one click away
+// as a fallback under the sign-in, with the copy button #2136 added.
+const idleController = {
+  update: ref(null), active: computed(() => false), pastedCode: ref(""), setPastedCode: () => undefined,
+  submittingCode: ref(false), codeCopied: ref(false), error: ref(null),
+  start: async () => undefined, submitCode: async () => undefined, cancel: async () => undefined,
+  copyCode: async () => undefined, openLink: async () => undefined,
 };
+const signInProps = { controller: idleController, needsSignIn: true, authCommand: longSignInCommand, copying: false };
 
 before(async () => {
   vite = await createServer({
@@ -43,8 +34,8 @@ before(async () => {
     logLevel: "silent",
     server: { middlewareMode: true },
   });
-  AddAgentSetupStatus = (await vite.ssrLoadModule(
-    "/renderer/src/components/desktop/content/add-agent/AddAgentSetupStatus.vue",
+  AddAgentSignIn = (await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/add-agent/AddAgentSignIn.vue",
   )).default;
 });
 
@@ -52,33 +43,29 @@ after(async () => {
   await vite?.close();
 });
 
-test("the sign-in command box shows a Copy button and the full, unclipped command", async () => {
+test("a provider that needs sign-in keeps a Copy button for its sign-in command", async () => {
   const html = await renderToString(createSSRApp({
-    render: () => h(AddAgentSetupStatus, setupProps),
+    render: () => h(AddAgentSignIn, signInProps),
   }));
-  assert.match(html, /<button[^>]*class="desktop-add-agent-auth-copy"[^>]*>\s*Copy sign-in command\s*<\/button>/);
-  // The whole command is in the page text, not cut to a prefix with an ellipsis.
-  assert.match(html, /claude auth login --scope full-length-example/);
-  assert.match(html, /CODEX_HOME=&#39;\/Users\/example\/\.codex&#39;/);
-  assert.doesNotMatch(html, /…/);
+  assert.match(html, /<button[^>]*class="desktop-add-agent-sign-in-quiet"[^>]*>\s*Copy the sign-in command instead\s*<\/button>/);
 });
 
 test("the Copy button shows Copying while a copy is in flight", async () => {
   const html = await renderToString(createSSRApp({
-    render: () => h(AddAgentSetupStatus, { ...setupProps, copyingAuthCommand: true }),
+    render: () => h(AddAgentSignIn, { ...signInProps, copying: true }),
   }));
-  assert.match(html, /<button[^>]*class="desktop-add-agent-auth-copy"[^>]*disabled[^>]*>\s*Copying\.\.\.\s*<\/button>/);
+  assert.match(html, /<button[^>]*class="desktop-add-agent-sign-in-quiet"[^>]*disabled[^>]*>\s*Copying\.\.\.\s*<\/button>/);
 });
 
-test("the Copy button emits copy-auth-command, which the modal wires to the shared copy helper", async () => {
+test("the Copy button emits copy-command, which the modal wires to the shared copy helper", async () => {
   // The SSR-loaded component cannot mount in the test renderer, so the click wiring is read from source.
   const base = "../src/components/desktop/content";
-  const status = await readFile(fileURLToPath(new URL(`${base}/add-agent/AddAgentSetupStatus.vue`, import.meta.url)), "utf8");
+  const signIn = await readFile(fileURLToPath(new URL(`${base}/add-agent/AddAgentSignIn.vue`, import.meta.url)), "utf8");
   const modal = await readFile(fileURLToPath(new URL(`${base}/AddAgentModal.vue`, import.meta.url)), "utf8");
-  assert.match(status, /"copy-auth-command": \[\];/);
-  assert.match(status, /class="desktop-add-agent-auth-copy"[\s\S]*?@click="emit\('copy-auth-command'\)"/);
-  assert.match(modal, /@copy-auth-command="copyAgentAuthCommand"/);
-  assert.match(modal, /:copying-auth-command="copyingAuthCommand"/);
+  assert.match(signIn, /"copy-command": \[\]/);
+  assert.match(signIn, /@click="emit\('copy-command'\)"/);
+  assert.match(modal, /@copy-command="copyAgentAuthCommand\(\)"/);
+  assert.match(modal, /:copying="copyingAuthCommand"/);
 });
 
 test("the sign-in command wraps instead of truncating with an ellipsis", async () => {

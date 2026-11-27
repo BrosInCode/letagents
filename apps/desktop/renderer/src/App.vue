@@ -4,40 +4,27 @@
   <main
     v-if="!showFirstRunSplash && (showFirstRunGate || (roomArrival && !showSignedOutGate))"
     class="desktop-onboarding-shell"
-    :data-cinematic="firstRunStage === 'welcome' || firstRunStage === 'github'"
+    :data-cinematic="showFirstRunGate"
     :data-room-arrival="showFirstRunGate ? null : roomArrival"
     :inert="!showFirstRunGate"
     :style="[roomTheme.css.value, { '--arrival-sidebar-edge': arrivalSidebarEdge }]"
     data-testid="desktop-first-run-onboarding"
   >
-    <FirstRunOnboardingView
-      :stage="firstRunStage"
-      :company-step="companyStep"
-      :invited-company-id="pendingCompanyInvite"
-      :company-name="company.selected.value?.login"
-      :rooms="firstRunRoomChoices"
-      :save-company-theme="canSetCompanyTheme ? company.changeTheme : undefined"
-      @choose-organization="chooseOnboardingCompany"
-      @retry-organizations="company.refresh"
-      @open-company-github="company.openOnGitHub"
+    <!-- First run: the welcome signs in; owners make their company theirs; the first agent and room are set up. -->
+    <OnboardingFlow
       :auth-status="authStatus"
-      :busy="mcpInstallBusy || authBusy || loading"
       :auth-busy="authBusy || loading"
-      :feedback="firstRunFeedback"
-      :selected-room-identifier="firstRunRoomSelected ? (rootRoomSnapshot?.roomIdentifier || null) : null"
-      :room-needs-github-access="firstRunRoomSelected && rootRoomSnapshot?.access.status === 'auth_required' && !authStatus?.authenticated"
-      @start-setup="startFirstRunSetup"
+      :auth-feedback="firstRunFeedback"
+      :organizations="company.organizations.value"
+      :organizations-loading="company.status.value === 'loading' || company.status.value === 'idle'"
+      :selected-company-id="company.activeId.value"
+      :invited-company-id="pendingCompanyInvite"
+      :choose-company="chooseCompanyForOnboarding"
+      :save-company-theme="company.changeTheme"
       @start-auth="startAuthFlow"
-      @open-verification="openVerification"
-      @poll-auth="pollAuthFlow"
       @cancel-auth="cancelAuthFlow"
-      @sign-out="signOut"
-      @continue-to-room="openOnboardingCompanyStep"
-      @continue-theme="continueToRoomConfirmation"
-      @connect-room-auth="startFirstRunRoomAuth"
-      @choose-room="openOnboardingRoom"
-      @new-room="openOnboardingNewRoom"
-      @back="goBackFirstRun"
+      @open-verification="openVerification"
+      @open-room="openOnboardingRoom"
       @finish="finishFirstRunOnboarding()"
     />
   </main>
@@ -517,7 +504,7 @@ import { isMembershipRefusal } from "./components/desktop/content/auth-onboardin
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialog.vue";
-import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
+import OnboardingFlow from "./components/desktop/onboarding/OnboardingFlow.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -569,7 +556,7 @@ const {
   sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
-  company, companyStep, companyInvite, pendingCompanyInvite, chooseOnboardingCompany, copyCompanyLink,
+  company, companyStep, companyInvite, pendingCompanyInvite, chooseOnboardingCompany, completeCompanyInvite, copyCompanyLink,
 } = Object.assign(app, useAppCompany(app));
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshInbox,
@@ -762,6 +749,14 @@ const firstRunRoomChoices = computed(() => company.activeId.value ? company.room
   local: room.source === "local",
   visibility: null,
 })));
+
+/** The new onboarding's company choice: join (or set up) the company, and finish a company link. */
+async function chooseCompanyForOnboarding(id: string): Promise<boolean> {
+  const invite = pendingCompanyInvite.value;
+  if (!(await company.choose(id))) return false;
+  if (invite === id) await completeCompanyInvite(invite);
+  return true;
+}
 
 function openOnboardingCompanyStep() {
   firstRunStage.value = "organization";
