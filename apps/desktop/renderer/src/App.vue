@@ -16,7 +16,8 @@
       :auth-busy="authBusy || loading"
       :auth-feedback="firstRunFeedback"
       :organizations="company.organizations.value"
-      :organizations-loading="company.status.value === 'loading' || company.status.value === 'idle'"
+      :organizations-status="company.status.value"
+      :organizations-error="company.error.value"
       :organizations-access="company.status.value === 'github_access_required' ? (company.accessReason.value ?? 'scope') : null"
       :open-organization-access="() => company.openOnGitHub({ kind: 'allow' })"
       :refresh-organizations="company.refresh"
@@ -27,8 +28,8 @@
       @start-auth="startAuthFlow"
       @cancel-auth="cancelAuthFlow"
       @open-verification="openVerification"
-      @open-room="openOnboardingRoom"
-      @finish="finishFirstRunOnboarding()"
+      :open-room="openOnboardingRoom"
+      :finish="finishOnboardingWithoutRoom"
     />
   </main>
 
@@ -772,8 +773,17 @@ const roomArrival = ref<"waiting" | "moving" | null>(null);
 const usedRoomFlight = ref(false);
 const arrivalSidebarEdge = ref("0px");
 
-async function openOnboardingRoom(id: string, icon?: HTMLElement) {
-  markFirstRoomTour(id);
+/** Why setup could not close, in the words setup left, else a plain fallback. */
+const onboardingExitError = (fallback: string) => firstRunFeedback.value || fallback;
+
+/** Skip: close setup without a first room. Null once it closed, else why not. */
+async function finishOnboardingWithoutRoom(): Promise<string | null> {
+  await finishFirstRunOnboarding();
+  return !showFirstRunGate.value ? null : onboardingExitError("Couldn’t close setup. Try again.");
+}
+
+/** Open the room setup made and close onboarding. Null once it opened, else why not. */
+async function openOnboardingRoom(id: string, icon?: HTMLElement): Promise<string | null> {
   const flight = prepareFirstRoomFlight(icon, edge => {
     arrivalSidebarEdge.value = `${edge}px`;
     roomArrival.value = "moving";
@@ -786,7 +796,11 @@ async function openOnboardingRoom(id: string, icon?: HTMLElement) {
   if (flight) roomArrival.value = "waiting";
   try {
     const snapshot = await joinRoomCode(id);
-    if (!snapshot || (snapshot.access.status !== "ready" && !isMembershipRefusal(snapshot.access.status))) return;
+    if (!snapshot || (snapshot.access.status !== "ready" && !isMembershipRefusal(snapshot.access.status))) {
+      return onboardingExitError("Couldn’t open your Welcome room. Try again.");
+    }
+    // Only a room that opened gets the tour; the room shell mounts after setup closes below.
+    markFirstRoomTour(id);
     const openedEntryId = activeEntry.value.id;
     const openedRoomId = normalizeRoomIdentifier(snapshot.roomIdentifier);
     await finishFirstRunOnboarding(snapshot, flight && {
@@ -797,6 +811,7 @@ async function openOnboardingRoom(id: string, icon?: HTMLElement) {
           ? entry.id : null;
       }).finally(clearArrival),
     });
+    return !showFirstRunGate.value ? null : onboardingExitError("Couldn’t close setup. Try again.");
   } finally {
     clearArrival();
   }

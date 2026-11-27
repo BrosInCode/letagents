@@ -27,14 +27,19 @@
     <footer class="onb-bottom">
       <div class="onb-left">
         <h1 ref="headingEl" class="onb-heading" tabindex="-1" data-morph="heading">
-          {{ access === "signin" ? "Reconnect GitHub." : access ? "Find your company." : `Make ${current?.login} yours.` }}
+          {{ mode === "access" && access === "signin" ? "Reconnect GitHub." : mode === "pick" ? `Make ${current?.login} yours.` : "Find your company." }}
         </h1>
-        <template v-if="access">
-          <!-- GitHub has not let LetAgents see the person's organizations yet: one step on GitHub, then back here. -->
-          <p class="onb-note" data-morph="rise">
-            {{ access === "signin"
-              ? "GitHub no longer accepts this sign-in. Connect again on GitHub, then come back."
-              : "Allow LetAgents to see which GitHub organizations you belong to. It changes nothing on GitHub." }}
+        <template v-if="mode !== 'pick'">
+          <!-- GitHub has not let LetAgents see the person's organizations yet: one step on GitHub, then back here.
+               Or the list could not be loaded, or it is still loading: never a company heading without a company. -->
+          <p class="onb-note" data-morph="rise" data-testid="onboarding-company-note">
+            {{ mode === "unavailable"
+              ? "LetAgents couldn’t get your organizations from GitHub. Check your connection, then try again."
+              : mode === "checking"
+                ? "Checking GitHub for your organizations…"
+                : access === "signin"
+                  ? "GitHub no longer accepts this sign-in. Connect again on GitHub, then come back."
+                  : "Allow LetAgents to see which GitHub organizations you belong to. It changes nothing on GitHub." }}
           </p>
           <p v-if="error" class="onb-feedback" role="alert">{{ error }}</p>
         </template>
@@ -61,9 +66,10 @@
       </div>
       <div class="onb-actions">
         <button type="button" class="onb-quiet" data-morph="rise" :disabled="busy" data-testid="onboarding-company-later" @click="emit('skip')">Later</button>
-        <button v-if="access" type="button" class="onb-primary" data-morph="primary" :disabled="busy" data-testid="onboarding-company-allow"
-          @click="accessOpened ? emit('retry') : emit('allow')">
-          <template v-if="busy"><LoaderCircle class="onb-spin" aria-hidden="true" /> Checking GitHub</template>
+        <button v-if="mode !== 'pick'" type="button" class="onb-primary" data-morph="primary" :disabled="busy || mode === 'checking'" data-testid="onboarding-company-allow"
+          @click="mode === 'unavailable' || accessOpened ? emit('retry') : emit('allow')">
+          <template v-if="busy || mode === 'checking'"><LoaderCircle class="onb-spin" aria-hidden="true" /> Checking GitHub</template>
+          <template v-else-if="mode === 'unavailable'">Try again <RotateCw aria-hidden="true" /></template>
           <template v-else-if="accessOpened">Check again <ArrowRight aria-hidden="true" /></template>
           <template v-else>Open GitHub <ArrowUpRight aria-hidden="true" /></template>
         </button>
@@ -78,7 +84,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { ArrowRight, ArrowUpRight, Check, LoaderCircle } from "@lucide/vue";
+import { ArrowRight, ArrowUpRight, Check, LoaderCircle, RotateCw } from "@lucide/vue";
 import { roomThemePresets, type RoomThemeId } from "../../../../../../../shared/room-themes.mjs";
 import type { DesktopGitHubAccessReason, DesktopOrganization } from "../../../../../electron/ipc-types/organizations";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
@@ -92,6 +98,8 @@ const props = defineProps<{
   access?: DesktopGitHubAccessReason | null;
   /** GitHub was opened for that access: the main button checks again. */
   accessOpened?: boolean;
+  /** The organization list could not be loaded: the main button tries again. */
+  unavailable?: boolean;
   organizationId: string | null;
   themeId: RoomThemeId;
   busy: boolean;
@@ -109,6 +117,8 @@ const emit = defineEmits<{
 const grain = useFilmGrain();
 const headingEl = ref<HTMLElement | null>(null);
 const current = computed(() => props.organizations.find(org => org.github_org_id === props.organizationId) ?? props.organizations[0] ?? null);
+/** What the screen shows: a company to make yours only when there is one. */
+const mode = computed(() => props.access ? "access" : current.value ? "pick" : props.unavailable ? "unavailable" : "checking");
 const initials = (login: string) => login.replace(/[^A-Za-z0-9]/g, "").slice(0, 2).toUpperCase();
 
 // A short, considered set of the room themes; the full palette stays in Settings.
