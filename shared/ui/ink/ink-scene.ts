@@ -205,29 +205,36 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
   const created: Array<() => void> = [];
   const compile = (type: number, source: string) => {
     const shader = gl.createShader(type)!;
+    created.push(() => gl.deleteShader(shader));
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader) || "shader failed");
-    created.push(() => gl.deleteShader(shader));
     return shader;
   };
-  const vertex = compile(gl.VERTEX_SHADER, baseVertex);
-  const programs = Object.fromEntries(Object.entries(shaders).map(([name, source]) => {
-    const program = gl.createProgram()!;
-    gl.attachShader(program, vertex);
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, source));
-    gl.bindAttribLocation(program, 0, "aPosition");
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`${name}: ${gl.getProgramInfoLog(program)}`);
-    created.push(() => gl.deleteProgram(program));
-    const uniforms: Uniforms = {};
-    const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) as number;
-    for (let i = 0; i < count; i++) {
-      const info = gl.getActiveUniform(program, i)!;
-      uniforms[info.name] = gl.getUniformLocation(program, info.name);
-    }
-    return [name, { program, uniforms }];
-  })) as Record<keyof typeof shaders, Program>;
+  let programs: Record<keyof typeof shaders, Program>;
+  try {
+    const vertex = compile(gl.VERTEX_SHADER, baseVertex);
+    programs = Object.fromEntries(Object.entries(shaders).map(([name, source]) => {
+      const program = gl.createProgram()!;
+      created.push(() => gl.deleteProgram(program));
+      gl.attachShader(program, vertex);
+      gl.attachShader(program, compile(gl.FRAGMENT_SHADER, source));
+      gl.bindAttribLocation(program, 0, "aPosition");
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(`${name}: ${gl.getProgramInfoLog(program)}`);
+      const uniforms: Uniforms = {};
+      const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) as number;
+      for (let i = 0; i < count; i++) {
+        const info = gl.getActiveUniform(program, i)!;
+        uniforms[info.name] = gl.getUniformLocation(program, info.name);
+      }
+      return [name, { program, uniforms }];
+    })) as Record<keyof typeof shaders, Program>;
+  } catch {
+    // A driver that cannot build the shaders: free what was made, and the page shows its static mark.
+    created.forEach(remove => remove());
+    return null;
+  }
 
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -556,6 +563,9 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
     // Simmer runs at half rate: slow water, half the work.
     const rate = mode === "simmer" ? 30 : 60;
     const wanted = Math.floor(lt * rate);
+    // Back from a hidden window, simmer would run three steps a frame until it caught up (six
+    // times its speed). It skips the missed time instead and goes on at its own pace.
+    if (mode === "simmer" && wanted - modeSteps > 3) modeSteps = wanted - 1;
     let going = true;
     let stepped = 0;
     for (; stepped < 3 && modeSteps < wanted; stepped++) { modeSteps++; going = liveStep(modeSteps / rate); }
