@@ -115,7 +115,7 @@ import codexIcon from "../../../assets/harness-icons/codex.png";
 import cursorIcon from "../../../assets/harness-icons/cursor.png";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
 import type { FirstRoomState, FirstRoomTask } from "./useOnboardingFirstRoom";
-import { onboardingUnavailableText, type OnboardingProvider } from "./useOnboardingAgents";
+import { onboardingNeedsProject, onboardingUnavailableText, type OnboardingProvider } from "./useOnboardingAgents";
 import { useFilmGrain } from "./useFilmGrain";
 import "./onboarding-step.css";
 
@@ -172,19 +172,23 @@ const checking = computed(() => props.providers.some(provider => provider.state 
 const tiles = computed(() => props.phase === "setup"
   ? props.providers.filter(provider => provider.id === props.selectedId)
   : props.providers);
-// The reason shows for the agent last clicked while it stays unavailable.
+// The reason shows for the agent last clicked while it stays unavailable. Only the person's
+// own click clears it (choose()): a check that finishes in the background must not.
 const noteFor = ref<string | null>(null);
-// A selection made another way (keyboard, a sign-in that finished) clears the note too.
-watch(() => props.selectedId, (id) => { if (id && id !== noteFor.value) noteFor.value = null; });
 const unavailableNote = computed(() => {
   const provider = props.providers.find(item => item.id === noteFor.value);
   if (!provider) return null;
   if (provider.state === "checking") return `Checking ${provider.name} again…`;
   return provider.state === "unavailable" ? onboardingUnavailableText(provider.name, provider.detail) : null;
 });
+// The same plain words as the note; a check again can't help an agent that needs a project folder.
+const unavailableHint = (provider: OnboardingProvider) => {
+  const text = onboardingUnavailableText(provider.name, provider.detail);
+  return onboardingNeedsProject(provider.detail) ? text : `${text} Click to check again.`;
+};
 const hintOf = (provider: OnboardingProvider) => ({
   ready: undefined, checking: "Checking this agent.", signin: "Needs sign-in. Click to sign in.",
-  "signing-in": "Finish signing in in your browser.", missing: "Not on this Mac. Click to get it.", unavailable: `${provider.detail} Click to check again.`,
+  "signing-in": "Finish signing in in your browser.", missing: "Not on this Mac. Click to get it.", unavailable: unavailableHint(provider),
 })[provider.state];
 const labelOf = (provider: OnboardingProvider) => provider.state === "ready" ? `${provider.name}, ready` : `${provider.name}. ${hintOf(provider) ?? ""}`;
 

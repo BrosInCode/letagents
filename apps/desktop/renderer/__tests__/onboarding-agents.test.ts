@@ -9,6 +9,7 @@ import type {
 } from "../../electron/ipc-types";
 import {
   onboardingStateFromPreflight,
+  onboardingNeedsProject,
   onboardingUnavailableText,
   useOnboardingAgents,
 } from "../src/components/desktop/onboarding/useOnboardingAgents";
@@ -266,5 +267,7 @@ test("an unavailable agent's note never names the agent twice", () => {
   assert.equal(onboardingUnavailableText("Claude Code", "Couldn't check Claude Code: timed out"), "Couldn't check Claude Code: timed out");
   assert.match(onboardingUnavailableText("Cursor", "Choose a local repository before starting Cursor."), /^Cursor works inside a project folder\./);
   assert.equal(onboardingUnavailableText("Cursor", "Cursor needs an update."), "Cursor needs an update.");
+  assert.equal(onboardingNeedsProject("Choose a local repository before starting Cursor."), true);
+  assert.equal(onboardingNeedsProject("Cursor needs an update."), false);
   assert.equal(onboardingUnavailableText("Cursor", ""), "Cursor can't start yet.");
 });

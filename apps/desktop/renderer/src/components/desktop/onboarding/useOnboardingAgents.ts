@@ -79,11 +79,15 @@ export function onboardingStateFromPreflight(
  * "<name> can't start yet: <reason>", unless the reason already says which agent failed
  * (a failed check reads "Couldn't check <name>: …"); then the reason alone.
  */
+/** The first room has no project folder, so an agent that works only in a repository can't be the first one. */
+export function onboardingNeedsProject(detail: string): boolean {
+  return /local repository|choose a (project|repository)|project folder/i.test(detail);
+}
+
 export function onboardingUnavailableText(name: string, detail: string): string {
   const reason = detail.trim();
   if (!reason) return `${name} can't start yet.`;
-  // The first room has no project folder, so an agent that works only in a repository can't be the first one.
-  if (/local repository|choose a (project|repository)|project folder/i.test(reason)) {
+  if (onboardingNeedsProject(reason)) {
     return `${name} works inside a project folder. Pick another agent now, and add ${name} later from a project room.`;
   }
   if (/^(couldn['’]t|could not|can['’]t|cannot)\b/i.test(reason) || reason.toLowerCase().includes(name.toLowerCase())) return reason;
