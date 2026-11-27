@@ -3,6 +3,7 @@ import type { AgentAvatar as Avatar } from "../../../../../../../../src/shared/a
 import type { AddAgentModalProps, AddAgentSupervisedUi } from "./useAddAgentController";
 import type AddAgentOpenModelSettings from "./AddAgentOpenModelSettings.vue";
 import { currentFocusableElement, restoreFocus, trapFocusInDialog } from "../modal-focus";
+import { freeAgentName, heldNameMatch, heldNameMessage } from "../../../../domain/room-held-names";
 
 /** Presentation only: mounted drafts, reversible scene turn and modal focus. */
 export function useAgentSetupPresentation(props: AddAgentModalProps, configuredName: Ref<string>, configuredAvatar: Ref<Avatar | null>, supervisedUi: AddAgentSupervisedUi) {
@@ -61,7 +62,26 @@ watch(() => props.open && Boolean(supervisedUi.launch.view.value?.failed), faile
 }, { immediate: true, flush: "post" });
 
 const step = ref<'identity' | 'brain'>('identity');
-const identityError = ref('');
+const formatError = ref('');
+// The name this dialog chose, so a later room update may replace it; a name
+// the person typed is never replaced, only warned about.
+let defaultName = '';
+let defaultSeed = '';
+const heldNames = computed(() => props.heldNames ?? []);
+// A launch in progress or saved is this agent's own name, already in the room.
+const heldNameError = computed(() => {
+  if (supervisedUi.launch.view.value) return '';
+  const match = heldNameMatch(configuredName.value, heldNames.value);
+  return match ? heldNameMessage(match) : '';
+});
+const identityError = computed(() => formatError.value || heldNameError.value);
+const takenNames = computed(() => heldNames.value.map(entry => entry.name));
+function chooseDefaultName(): void {
+  if (!defaultSeed) defaultSeed = globalThis.crypto?.randomUUID?.() ?? String(Math.random());
+  defaultName = freeAgentName(heldNames.value, defaultSeed);
+  configuredName.value = defaultName;
+}
+watch(configuredName, () => { formatError.value = ''; });
 const identityAvatar = computed<Avatar>({ get: () => configuredAvatar.value || { kind: 'character', character: 'orbit', color: 'sage' }, set: value => { configuredAvatar.value = value; } });
 const motionPaused = ref(false);
 const turnBody = ref<HTMLElement | null>(null), turnStage = ref<HTMLElement | null>(null), turning = ref(false);
@@ -83,8 +103,9 @@ function tickTurn(time: number) {
 function showStep(next: 'identity' | 'brain', event?: MouseEvent) {
   if (next === 'brain') {
     const name = configuredName.value.trim();
-    if (!name || !/[\p{L}\p{N}]/u.test(name) || [...name].length > 32) { identityError.value = 'Choose a name with 1–32 characters.'; return; }
-    identityError.value = '';
+    if (!name || !/[\p{L}\p{N}]/u.test(name) || [...name].length > 32) { formatError.value = 'Choose a name with 1–32 characters.'; return; }
+    formatError.value = '';
+    if (heldNameError.value) return;
     configuredAvatar.value = identityAvatar.value;
   }
   // Focus leaves the outgoing panel before it becomes inert. Drafts remain mounted.
@@ -95,9 +116,15 @@ function showStep(next: 'identity' | 'brain', event?: MouseEvent) {
   else { turning.value = true; if (!frame) { lastTime = 0; frame = requestAnimationFrame(tickTurn); } }
 }
 watch(() => props.open, open => {
-  if (open) { if (!configuredName.value) configuredName.value = 'Atlas'; configuredAvatar.value ??= identityAvatar.value; step.value = props.initialSection ? 'brain' : 'identity'; target = step.value === 'brain' ? 1 : 0; }
+  if (open) { if (!configuredName.value || configuredName.value === defaultName || (!supervisedUi.launch.view.value && heldNameMatch(configuredName.value, heldNames.value))) chooseDefaultName(); configuredAvatar.value ??= identityAvatar.value; step.value = props.initialSection ? 'brain' : 'identity'; target = step.value === 'brain' ? 1 : 0; }
   settleTurn();
 }, { immediate: true });
+// The room's names can arrive after the dialog opens. Move off a default
+// name that turned out to be taken; leave a typed name to its warning.
+watch(heldNames, () => {
+  if (props.open && !supervisedUi.launch.view.value && configuredName.value === defaultName
+    && heldNameMatch(defaultName, heldNames.value)) chooseDefaultName();
+});
 // A remembered launch may be restored after the modal opens. Its progress and
 // recovery controls live on Brain; Identity is only for configuring a new agent.
 watch(() => props.open && Boolean(supervisedUi.launch.view.value), active => {
@@ -114,5 +141,5 @@ onMounted(() => {
 });
 onBeforeUnmount(() => { cancelAnimationFrame(frame); sizeObserver?.disconnect(); reducedMotion?.removeEventListener('change', reduceTurn); });
 
-return { dialogElement, openModelSettings, handleAfterLeave, handleDialogTab, handleRecoverSupervisedLaunch, step, identityError, identityAvatar, motionPaused, turnBody, turnStage, turning, showStep };
+return { dialogElement, openModelSettings, handleAfterLeave, handleDialogTab, handleRecoverSupervisedLaunch, step, identityError, takenNames, identityAvatar, motionPaused, turnBody, turnStage, turning, showStep };
 }

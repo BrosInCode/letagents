@@ -29,8 +29,9 @@ import type { AgentAvatar as Avatar, AgentAvatarCharacter, AgentAvatarColor } fr
 import AgentAvatar from './AgentAvatar.vue';
 import { avatarColors, avatarFinish, characterNames } from './avatar-catalog';
 import { rememberAvatarPortrait } from './avatar-portraits';
+import { FRIENDLY_AGENT_NAMES, agentDisplayNameKey, suggestFreeAgentCodenameFrom } from '../../agent-names.mjs';
 import type { AvatarPreview } from './scene/avatar-3d';
-const props = withDefaults(defineProps<{ modelValue: Avatar; name: string; compact?: boolean; active?: boolean; animate?: boolean; error?: string }>(), { compact: false, active: true, animate: true, error: '' });
+const props = withDefaults(defineProps<{ modelValue: Avatar; name: string; compact?: boolean; active?: boolean; animate?: boolean; error?: string; takenNames?: readonly string[] }>(), { compact: false, active: true, animate: true, error: '', takenNames: () => [] });
 const emit = defineEmits<{ 'update:modelValue': [value: Avatar]; 'update:name': [value: string]; select: [value: Avatar] }>();
 const nameId = `agent-name-${useId()}`;
 const stage = ref<HTMLElement>(); const rail = ref<HTMLElement>(); const fileInput = ref<HTMLInputElement>();
@@ -44,7 +45,18 @@ function choose(value: Avatar) { uploadVersion++; uploadError.value = ''; emit('
 function chooseMode(kind: 'character' | 'initials') { choose(kind === 'character' ? { kind, character: lastCharacter, color: selectedColor.value } : { kind, color: selectedColor.value }); }
 function chooseColor(id: string) { if (props.modelValue.kind !== 'image') choose({ ...props.modelValue, color: id as AgentAvatarColor }); }
 function chooseCharacter(character: AgentAvatarCharacter) { choose({ kind: 'character', character, color: selectedColor.value }); }
-function suggest() { const names = ['Atlas', 'Scout', 'Nova', 'Milo', 'Echo', 'Sage', 'Reviewer', 'Builder']; emit('update:name', names[(names.indexOf(props.name) + 1) % names.length]); }
+const SUGGESTED_NAMES = FRIENDLY_AGENT_NAMES;
+/** The next suggestion that nobody in the room answers to; a codename when all are taken. */
+function suggest() {
+  const taken = new Set(props.takenNames.map(agentDisplayNameKey).filter(Boolean));
+  const start = SUGGESTED_NAMES.indexOf(props.name);
+  for (let step = 1; step <= SUGGESTED_NAMES.length; step += 1) {
+    const candidate = SUGGESTED_NAMES[(start + step) % SUGGESTED_NAMES.length];
+    if (!taken.has(agentDisplayNameKey(candidate))) { emit('update:name', candidate); return; }
+  }
+  const codename = suggestFreeAgentCodenameFrom(props.takenNames, Math.floor(Math.random() * 10_000));
+  if (codename) emit('update:name', codename);
+}
 function moveCharacter(event: KeyboardEvent) {
   if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   event.preventDefault(); const index = event.key === 'Home' ? 0 : event.key === 'End' ? characterIds.length - 1 : (characterIndex.value + (event.key === 'ArrowRight' ? 1 : -1) + characterIds.length) % characterIds.length;

@@ -467,6 +467,7 @@ const required = [
     "shared/agent-branch.mjs",
     "shared/api-agent-tools.mjs",
     "shared/agent-codenames.mjs",
+    "shared/agent-names.mjs",
     "shared/agent-live-trace.mjs",
     "shared/attachment-content.mjs",
     "shared/attachment-download.mjs",

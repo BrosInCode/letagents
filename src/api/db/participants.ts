@@ -143,6 +143,35 @@ export async function getRoomParticipants(
   return (rows as RoomParticipantRow[]).map(row => ({ ...toRoomParticipant(row), ...(row.agent_key && avatars.has(row.agent_key) ? { avatar: avatars.get(row.agent_key) } : {}) }));
 }
 
+/**
+ * The names people in a room answer to, which a new agent must not take:
+ * "@name" would otherwise reach the agent or the person depending on who
+ * routed it. Each visible person's display name and GitHub login.
+ *
+ * Empty for an agent that has been in the room before. It keeps the name
+ * people already address it by, so this rule never renames an agent.
+ * Narrow on purpose: the supervisor worker mint reads it.
+ */
+export async function getRoomPeopleNamesHeldFromNewAgent(roomId: string, agentKey: string, limit = 500): Promise<string[]> {
+  const [history] = await db
+    .select({ participant_key: room_participants.participant_key })
+    .from(room_participants)
+    .where(and(eq(room_participants.room_id, roomId), eq(room_participants.agent_key, agentKey)))
+    .limit(1);
+  if (history) return [];
+  const rows = await db
+    .select({ display_name: room_participants.display_name, github_login: room_participants.github_login })
+    .from(room_participants)
+    .where(and(
+      eq(room_participants.room_id, roomId),
+      eq(room_participants.kind, "human"),
+      isNull(room_participants.hidden_at),
+    ))
+    .limit(limit);
+  return [...new Set(rows.flatMap((row) => [row.display_name, row.github_login]
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0)))];
+}
+
 export async function getRoomParticipantsForRooms(
   roomIds: readonly string[],
   options?: { includeHidden?: boolean; includeAvatars?: boolean }

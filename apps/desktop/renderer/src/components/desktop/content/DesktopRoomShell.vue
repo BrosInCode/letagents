@@ -351,7 +351,7 @@
       :repo-root-path="managedAgentRepoRootPath"
       :repo-status="managedAgentRepoStatus"
       :initial-provider-id="addAgentInitialProviderId"
-      :initial-section="addAgentInitialSection"
+      :initial-section="addAgentInitialSection" :held-names="addAgentHeldNames"
       @close="closeAddAgentModal"
       @launch-saved="handleFullAgentSaved"
       @choose-worktree="openAgentWorktree"
@@ -541,7 +541,7 @@ const {
 
 const {
   githubEventsAvailable,
-  managedAgentRepoStatus, managedAgentRepoRootPath, roomParticipants, localAgentWork,
+  managedAgentRepoStatus, managedAgentRepoRootPath, roomParticipants, localAgentWork, addAgentHeldNames,
 } = Object.assign(app, useRoomShellParticipants(app));
 
 // The room's own agents' background commands: the activity strip and the Live tab show them and stop them.
