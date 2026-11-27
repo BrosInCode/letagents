@@ -169,7 +169,7 @@ test('signed-out blank creation starts GitHub sign-in and creates no room', asyn
     assert.equal(vm.actionLabel.value, 'Sign in to create')
     assert.equal(vm.canSubmit.value, true)
     await vm.handleSubmit()
-    assert.deepEqual(requests, [{ input: '/auth/github/login', body: { redirect_to: '/?new=blank#start' } }])
+    assert.deepEqual(requests, [{ input: '/auth/github/login', body: { redirect_to: '/new?new=blank' } }])
     assert.equal(vm.createdRoomId.value, '')
     assert.equal(navigations.length, count)
     assert.equal(vm.busy.value, false)

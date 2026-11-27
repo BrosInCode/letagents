@@ -78,8 +78,8 @@ test('the Windows installer appears beside the DMGs once the current release lis
   }), { status: 200 }))
   assert.equal(release.downloads.windows, 'https://downloads.letagents.chat/desktop/v0.1.131/LetAgents-0.1.131-win32-x64-setup.exe')
 
-  const heroSource = readFileSync(fileURLToPath(new URL('../src/components/landing/HeroSection.vue', import.meta.url)), 'utf8')
-  assert.doesNotMatch(heroSource, /SmartScreen/)
+  const welcomeSource = readFileSync(fileURLToPath(new URL('../src/components/landing/InkWelcome.vue', import.meta.url)), 'utf8')
+  assert.doesNotMatch(welcomeSource, /SmartScreen/)
 })
 
 test('the visitor platform leads the download links, and Windows appears only with an installer', () => {
@@ -139,10 +139,10 @@ test('Mac beta presentation rejects a current manifest older than its bundled fa
 })
 
 test('Mac beta anchor clears the fixed navigation bar', () => {
-  const heroPath = fileURLToPath(new URL('../src/components/landing/HeroSection.vue', import.meta.url))
-  const heroSource = readFileSync(heroPath, 'utf8')
-  assert.match(heroSource, /id="download-mac"/)
-  assert.match(heroSource, /scroll-margin-top:\s*calc\(92px \+ env\(safe-area-inset-top, 0px\)\)/)
+  const welcomePath = fileURLToPath(new URL('../src/components/landing/InkWelcome.vue', import.meta.url))
+  const welcomeSource = readFileSync(welcomePath, 'utf8')
+  assert.match(welcomeSource, /id="download-mac"/)
+  assert.match(welcomeSource, /scroll-margin-top:\s*calc\(92px \+ env\(safe-area-inset-top, 0px\)\)/)
 })
 
 test('hash navigation clears the measured navbar and respects reduced motion without changing history restoration', async () => {

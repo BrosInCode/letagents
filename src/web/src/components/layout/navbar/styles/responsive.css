@@ -45,16 +45,8 @@
     text-overflow: ellipsis;
   }
 
-  .nav-mobile-primary,
   .nav-mobile-toggle {
     display: inline-flex;
-  }
-
-  .nav-mobile-primary {
-    margin-left: auto;
-    min-height: 44px;
-    padding: 7px 12px;
-    font-size: 0.8rem;
   }
 
   .nav-mobile-panel {
@@ -94,11 +86,6 @@
 
   .nav-name {
     max-width: 104px;
-  }
-
-  .nav-mobile-primary {
-    padding: 7px 9px;
-    font-size: 0.75rem;
   }
 
 }

@@ -1,7 +1,7 @@
 <template>
   <section id="start" class="entry-section" aria-labelledby="entry-title">
     <div class="entry-intro">
-      <h2 id="entry-title" class="entry-title">Step into a room.</h2>
+      <h1 id="entry-title" class="entry-title">Step into a room.</h1>
       <p class="entry-sub">Open your project, start a conversation, or join your team.</p>
     </div>
     <form class="entry-card" @submit.prevent="handleSubmit">
@@ -77,7 +77,7 @@ const router = useRouter()
 const auth = useAuth()
 const tabs = [{ id: 'project', label: 'Project' }, { id: 'blank', label: 'Blank room' }, { id: 'join', label: 'Join room' }] as const
 // Sign-in from the Blank room tab comes back to that tab.
-const BLANK_ROOM_RETURN = '/?new=blank#start'
+const BLANK_ROOM_RETURN = '/new?new=blank'
 const tab = ref(typeof window !== 'undefined' && new URLSearchParams(window.location?.search || '').get('new') === 'blank' ? 'blank' : 'project')
 const repository = ref('')
 const invitation = ref('')

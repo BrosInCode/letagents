@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { roomFormRedirect } from './roomFormRedirect'
 
 const routes = [
   { path: "/inbox", name: "inbox", component: () => import("./pages/Inbox.vue") },
@@ -14,6 +15,11 @@ const routes = [
     path: '/',
     name: 'landing',
     component: () => import('./pages/Landing.vue'),
+  },
+  {
+    path: '/new',
+    name: 'new-room',
+    component: () => import('./pages/NewRoom.vue'),
   },
   {
     path: '/ask/:token',
@@ -49,3 +55,6 @@ export const router = createRouter({
     return { top: 0 }
   },
 })
+
+// Runs on every navigation, so a hash or query change on / is redirected too.
+router.beforeEach(to => roomFormRedirect(to))

@@ -5,16 +5,17 @@
     </RouterLink>
     <a :href="GITHUB_REPOSITORY_URL" target="_blank" class="nav-link">GitHub</a>
 
-    <div class="nav-divider" />
-    <NavbarAuthControls />
-
-    <RouterLink :to="ROOM_ENTRY_LINK.to" class="nav-btn nav-btn-primary nav-btn-sm">
-      Open a Room &rarr;
-    </RouterLink>
+    <template v-if="showAuth">
+      <div class="nav-divider" />
+      <NavbarAuthControls />
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import NavbarAuthControls from './NavbarAuthControls.vue'
-import { DOCS_LINK, GITHUB_REPOSITORY_URL, ROOM_ENTRY_LINK } from './links'
+import { DOCS_LINK, GITHUB_REPOSITORY_URL } from './links'
+import { useNavbarAuthVisible } from './useNavbarAuthVisible'
+
+const showAuth = useNavbarAuthVisible()
 </script>

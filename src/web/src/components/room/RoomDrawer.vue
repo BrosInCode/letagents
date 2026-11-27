@@ -156,7 +156,7 @@ Type ${room.identifier} to confirm:`)
     await apiFetch(roomPath(room.identifier), { method: 'DELETE', body: JSON.stringify({ confirmation }) })
     leaveRoom()
     emit('close')
-    await router.replace('/')
+    await router.replace('/new')
   } catch (error) { deleteRoomError.value = error instanceof Error ? error.message : 'Room could not be deleted.' }
   finally { deletingRoom.value = false }
 }

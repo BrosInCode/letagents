@@ -116,41 +116,32 @@ test('docs sidebar exposes dialog and current-location semantics only where appr
   assert.doesNotMatch(desktop, /aria-modal|Close navigation/)
 })
 
-test('landing theme follows the existing preference and refreshes after a room changes it', async () => {
-  let activeTheme = 'light'
-  const document = { documentElement: {
-    getAttribute: () => activeTheme,
-    setAttribute: (_name: string, value: string) => { activeTheme = value },
-  } }
-  Object.defineProperty(globalThis, 'document', { configurable: true, value: document })
+test('the docs check the session first, so a signed-in reader keeps the account controls', async t => {
+  const originalFetch = globalThis.fetch
+  const requests: string[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requests.push(String(input))
+    return new Response(JSON.stringify({ authenticated: true, account: { login: 'reader' } }), { status: 200 })
+  }) as typeof fetch
+  t.after(() => { globalThis.fetch = originalFetch })
   const router = createRouter({ history: createMemoryHistory(), routes: [
-    { path: '/', name: 'landing', component: { render: () => null } },
-    { path: '/in/test', name: 'room', component: { render: () => null } },
+    { path: '/docs', name: 'docs', component: { render: () => h('p', 'Documentation') } },
   ] })
-  await router.push('/')
-  let vm: any
-  const app = renderer.createApp({ setup() {
-    vm = AppShell.setup({}, { expose() {} })
-    return () => h('div')
-  } })
-  app.use(router)
-  app.provide(ssrContextKey, { modules: new Set() })
-  app.mount({})
-  try {
-    assert.equal(vm.theme.value, 'light')
-    assert.equal(activeTheme, 'light', 'opening the landing page must not impose a new preference')
-    vm.toggleLandingTheme()
-    assert.equal(vm.theme.value, 'dark')
-    assert.equal(activeTheme, 'dark')
-    await router.push('/in/test')
-    activeTheme = 'light'
-    await router.push('/')
-    await nextTick()
-    assert.equal(vm.theme.value, 'light', 'canvas and theme toggle agree with a preference changed in the room')
-  } finally { app.unmount() }
+  const render = async () => {
+    const app = createSSRApp({ render: () => h(AppShell) })
+    app.use(router)
+    return renderToString(app)
+  }
+  await router.push('/docs')
+  const before = await render()
+  assert.deepEqual(requests, ['/auth/session'])
+  assert.doesNotMatch(before, /nav-divider/)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.match(await render(), /nav-divider/)
+  assert.equal(requests.length, 1)
 })
 
-test('Venom styling and theme controls are confined to the landing route', async () => {
+test('Venom styling is confined to the landing route, which has no theme toggle or footer', async () => {
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/', name: 'landing', component: { render: () => h('p', 'Landing') } },
     { path: '/docs', name: 'docs', component: { render: () => h('p', 'Documentation') } },
@@ -164,7 +155,7 @@ test('Venom styling and theme controls are confined to the landing route', async
   }
   const landing = await render('/')
   assert.match(landing, /class="landing-theme"/)
-  assert.match(landing, /aria-label="Switch to dark mode"/)
+  assert.doesNotMatch(landing, /nav-theme-toggle|class="footer"/)
   const docs = await render('/docs')
   assert.doesNotMatch(docs, /class="landing-theme"|nav-theme-toggle/)
   assert.match(docs, /Documentation/)
