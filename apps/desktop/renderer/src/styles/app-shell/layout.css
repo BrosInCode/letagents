@@ -195,9 +195,13 @@ html[data-window-chrome="mac"] .desktop-room-header { -webkit-app-region: drag; 
 html[data-window-chrome="mac"] .desktop-room-header :is(button, a, input, select, textarea, [role="button"], [tabindex]) {
   -webkit-app-region: no-drag;
 }
-/* A drag area takes every click on it, even under a menu or dialog that sits
-   on top, unless that layer says no-drag. Keep such layers clickable. */
-html[data-window-chrome="mac"] :is([role="menu"], [role="dialog"], [role="listbox"], [aria-modal="true"], dialog) {
+/* A drag area takes every click on it, even under a menu, dialog or backdrop
+   that sits on top, unless that layer says no-drag. Keep such layers
+   clickable: a backdrop click must still close its dialog. */
+html[data-window-chrome="mac"] :is(
+  [role="menu"], [role="dialog"], [role="listbox"], [aria-modal="true"], dialog,
+  [class*="backdrop"], [class*="scrim"], .room-selection-popover, .work-filter-menu, .live-demo-overlay
+) {
   -webkit-app-region: no-drag;
 }
 html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"] .app-main { padding-top: 36px; }
