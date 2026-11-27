@@ -15,9 +15,8 @@ import {
 } from "../../../domain/managed-agents";
 import { desktopIpc } from "../../../ipc/index.js";
 import { contextualAddAgentError } from "../content/add-agent/add-agent-errors";
-import { defaultSupervisedCharter } from "../content/add-agent/useAddAgentConfiguration";
 import { createSupervisedAgentFromSnapshot } from "../content/add-agent/useAddAgentController";
-import { onboardingProviderName, onboardingStateFromPreflight } from "./useOnboardingAgents";
+import { onboardingProviderName, onboardingStateFromPreflight, onboardingUnavailableText } from "./useOnboardingAgents";
 
 export type FirstRoomTask = "connect" | "room" | "agent";
 export type FirstRoomState = "idle" | "running" | "done" | "failed";
@@ -29,20 +28,62 @@ export const ONBOARDING_AGENT_DEFAULT_NAME = "Atlas";
 export const ONBOARDING_AGENT_DEFAULT_AVATAR: AgentAvatar = { kind: "character", character: "orbit", color: "sage" };
 export const ONBOARDING_ROOM_NAME = "Welcome";
 /**
- * The first agent's first message. A new person meets LetAgents through this agent, so its
- * hello says what LetAgents is, in plain words, before anything else.
+ * The first agent's first message. The room shows it as the person's own first message, so it is
+ * written in their voice. It asks what LetAgents is, so the agent's hello explains that first.
+ * (The managed-room rules reach the agent separately on each turn.)
  */
-export const ONBOARDING_AGENT_CHARTER = [
-  defaultSupervisedCharter,
-  "This is the person's Welcome room, and you are their first agent in LetAgents.",
-  "LetAgents is a place where a team and its agents work together: each room holds the conversation, the agents, a task board and shared memory.",
-  "Say hello now in under 60 words: explain in one or two plain sentences what LetAgents is, then offer to help them start (open a project folder as a room, invite a teammate, or give you a first task).",
-  "Later, answer questions about LetAgents first and plainly, then help with their work.",
-].join(" ");
+export const ONBOARDING_AGENT_CHARTER =
+  "Hi! I just set up LetAgents. In a sentence or two, what is LetAgents, and how can you help me get started here?";
 
 export interface FirstRoomRunInput {
   providerId: DesktopAgentProviderId;
+  /** Used for the first room only: a room that exists already keeps its company. */
   organizationId: string | null;
+}
+
+export interface FirstRoomOptions {
+  /**
+   * Where this account's setup progress is kept (see firstRoomProgressKey). With a key, a quit
+   * or a reload between tries reuses the same room and agent request instead of making new ones.
+   */
+  storageKey?: () => string | null;
+}
+
+/** What setup keeps between app runs, per account. */
+export interface FirstRoomProgress {
+  roomIdentifier: string;
+  organizationId: string | null;
+  creation: { providerId: DesktopAgentProviderId; id: string } | null;
+}
+
+export function firstRoomProgressKey(auth: { authenticated?: boolean; apiUrl?: string | null; account?: { id?: string | number | null } | null } | null | undefined): string | null {
+  const id = auth?.authenticated ? auth.account?.id : null;
+  return id === null || id === undefined || id === "" ? null : `letagents-desktop:onboarding-first-room:${auth?.apiUrl ?? ""}:${id}`;
+}
+
+function readProgress(key: string | null): FirstRoomProgress | null {
+  if (!key) return null;
+  try {
+    const raw = globalThis.localStorage?.getItem(key);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<FirstRoomProgress> | null;
+    if (!value || typeof value.roomIdentifier !== "string" || !value.roomIdentifier) return null;
+    const organizationId = typeof value.organizationId === "string" ? value.organizationId : null;
+    const creation = value.creation && typeof value.creation.id === "string" && typeof value.creation.providerId === "string"
+      ? { providerId: value.creation.providerId, id: value.creation.id }
+      : null;
+    return { roomIdentifier: value.roomIdentifier, organizationId, creation };
+  } catch {
+    return null;
+  }
+}
+
+function writeProgress(key: string | null, progress: FirstRoomProgress | null): void {
+  if (!key) return;
+  try {
+    if (progress) globalThis.localStorage?.setItem(key, JSON.stringify(progress));
+    else globalThis.localStorage?.removeItem(key);
+  } catch { /* Setup still works; a quit between tries then starts over. */ }
 }
 
 /**
@@ -76,7 +117,7 @@ function notReadyMessage(name: string, preflight: DesktopAgentProviderPreflight)
   const { state, detail } = onboardingStateFromPreflight(preflight);
   if (state === "signin") return `${name} is not signed in. Sign in, then try again.`;
   if (state === "missing") return `${name} is not installed on this Mac. Install it, then try again.`;
-  return `${name} can't start yet: ${detail}`;
+  return onboardingUnavailableText(name, detail);
 }
 
 /** Thrown for a step that failed for a reason we can say plainly. */
@@ -87,23 +128,48 @@ class FirstRoomStepError extends Error {}
  * room, start the first agent in it. A retry keeps the room and the agent's
  * creation request id, so it never makes a second room or a second agent.
  */
-export function useOnboardingFirstRoom() {
+export function useOnboardingFirstRoom(options: FirstRoomOptions = {}) {
   const state = ref<FirstRoomState>("idle");
   const task = ref<FirstRoomTask | null>(null);
   const error = ref<string | null>(null);
-  const room = ref<{ roomIdentifier: string; snapshot: DesktopRoomSnapshot } | null>(null) as Ref<
-    { roomIdentifier: string; snapshot: DesktopRoomSnapshot } | null
+  // The snapshot is null for a room restored from an earlier run.
+  const room = ref<{ roomIdentifier: string; snapshot: DesktopRoomSnapshot | null } | null>(null) as Ref<
+    { roomIdentifier: string; snapshot: DesktopRoomSnapshot | null } | null
   >;
   const agent = ref<{ displayName: string; avatar: AgentAvatar | null } | null>(null) as Ref<
     { displayName: string; avatar: AgentAvatar | null } | null
   >;
 
   let running: Promise<boolean> | null = null;
-  // Survive a failed run, so Retry converges on the same room and agent.
-  let roomOrganizationId: string | null | undefined;
+  let resetPending = false;
+  // Survive a failed run (and, with a storage key, a quit), so Retry converges on the same room and agent.
+  let roomOrganizationId: string | null = null;
   let roomNamed = false;
   let creation: { providerId: DesktopAgentProviderId; roomIdentifier: string; id: string } | null = null;
   let agentCreated = false;
+  // The account a run started for: a sign-out mid-run never writes into the next account's progress.
+  let runKey: string | null = null;
+
+  function save(): void {
+    if (!room.value || resetPending) return;
+    writeProgress(runKey, {
+      roomIdentifier: room.value.roomIdentifier,
+      organizationId: roomOrganizationId,
+      creation: creation ? { providerId: creation.providerId, id: creation.id } : null,
+    });
+  }
+
+  /** A room from an earlier run of the app: use it again, with the same agent request. */
+  function restore(): void {
+    if (room.value) return;
+    const saved = readProgress(runKey);
+    if (!saved) return;
+    room.value = { roomIdentifier: saved.roomIdentifier, snapshot: null };
+    roomOrganizationId = saved.organizationId;
+    roomNamed = false;
+    creation = saved.creation ? { ...saved.creation, roomIdentifier: saved.roomIdentifier } : null;
+    agentCreated = false;
+  }
 
   function prepare(providerId: DesktopAgentProviderId): void {
     if (agentCreated || state.value === "running") return;
@@ -132,7 +198,8 @@ export function useOnboardingFirstRoom() {
   }
 
   async function createRoom(organizationId: string | null): Promise<string> {
-    if (!room.value || roomOrganizationId !== organizationId) {
+    // The company is fixed by the first try: a later try (another company chosen, or none) reuses the room.
+    if (!room.value) {
       try {
         const created = await desktopIpc.room.createInviteRoom({ organizationId });
         room.value = { roomIdentifier: created.roomIdentifier, snapshot: created.snapshot };
@@ -140,6 +207,7 @@ export function useOnboardingFirstRoom() {
         roomNamed = false;
         creation = null;
         agentCreated = false;
+        save();
       } catch (cause) {
         throw new FirstRoomStepError(contextualAddAgentError(
           "Couldn't create your Welcome room",
@@ -152,7 +220,7 @@ export function useOnboardingFirstRoom() {
     if (!roomNamed && typeof desktopIpc.room.rename === "function") {
       try {
         const info = await desktopIpc.room.rename(current.roomIdentifier, ONBOARDING_ROOM_NAME);
-        room.value = { ...current, snapshot: { ...current.snapshot, room: info } };
+        room.value = { ...current, snapshot: current.snapshot ? { ...current.snapshot, room: info } : null };
         roomNamed = true;
       } catch {
         // The room works without its name; a retry tries the name again.
@@ -182,6 +250,7 @@ export function useOnboardingFirstRoom() {
     }
     if (!creation || creation.providerId !== providerId || creation.roomIdentifier !== roomIdentifier) {
       creation = { providerId, roomIdentifier, id: globalThis.crypto.randomUUID() };
+      save();
     }
     const identity = agent.value ?? { displayName: ONBOARDING_AGENT_DEFAULT_NAME, avatar: { ...ONBOARDING_AGENT_DEFAULT_AVATAR } };
     const permissionProfileId = profile?.id ?? null;
@@ -218,6 +287,8 @@ export function useOnboardingFirstRoom() {
     running = (async () => {
       state.value = "running";
       error.value = null;
+      runKey = options.storageKey?.() ?? null;
+      restore();
       if (!agent.value) prepare(input.providerId);
       try {
         task.value = "connect";
@@ -237,26 +308,42 @@ export function useOnboardingFirstRoom() {
         return false;
       } finally {
         running = null;
+        if (resetPending) clear();
       }
     })();
     return running;
   }
 
-  /** Starts over: the next run makes a new room. Does nothing while a run is going. */
-  function reset(): void {
-    if (running) return;
+  function clear(): void {
+    resetPending = false;
     state.value = "idle";
     task.value = null;
     error.value = null;
     room.value = null;
     agent.value = null;
-    roomOrganizationId = undefined;
+    roomOrganizationId = null;
     roomNamed = false;
     creation = null;
     agentCreated = false;
   }
 
-  return { state, task, error, room, agent, prepare, run, reset };
+  /**
+   * Clears what this screen holds (another account signed in, or the person signed out). Progress
+   * saved for an account stays, so that account's next run reuses its room. A reset during a run
+   * waits for the run to end.
+   */
+  function reset(): void {
+    if (running) resetPending = true;
+    else clear();
+  }
+
+  /** Setup is over (the room opened, or the person skipped): drop the saved progress too. */
+  function forget(): void {
+    writeProgress(options.storageKey?.() ?? null, null);
+    reset();
+  }
+
+  return { state, task, error, room, agent, prepare, run, reset, forget };
 }
 
 export type OnboardingFirstRoom = ReturnType<typeof useOnboardingFirstRoom>;

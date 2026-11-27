@@ -7,11 +7,11 @@ import type {
   DesktopManagedAgentPermissionProfile,
   DesktopSupervisorCreateInput,
 } from "../../electron/ipc-types";
-import { defaultSupervisedCharter } from "../src/components/desktop/content/add-agent/useAddAgentConfiguration";
 import {
   ONBOARDING_AGENT_DEFAULT_AVATAR,
   ONBOARDING_AGENT_CHARTER,
   ONBOARDING_AGENT_DEFAULT_NAME,
+  firstRoomProgressKey,
   onboardingPermissionProfile,
   useOnboardingFirstRoom,
 } from "../src/components/desktop/onboarding/useOnboardingFirstRoom";
@@ -85,7 +85,7 @@ test("a new agent gets Add Agent's defaults in a room with no project", async ()
   assert.equal(firstRoom.state.value, "done");
   assert.deepEqual(bridge.calls, ["createInviteRoom 42", "rename room_1 Welcome"]);
   assert.equal(firstRoom.room.value?.roomIdentifier, "room_1");
-  assert.equal(firstRoom.room.value?.snapshot.room?.displayName, "Welcome");
+  assert.equal(firstRoom.room.value?.snapshot?.room?.displayName, "Welcome");
   assert.equal(bridge.creates.length, 1);
   const input = bridge.creates[0];
   assert.equal(input.roomIdentifier, "room_1");
@@ -93,8 +93,9 @@ test("a new agent gets Add Agent's defaults in a room with no project", async ()
   assert.deepEqual(input.avatar, ONBOARDING_AGENT_DEFAULT_AVATAR);
   assert.equal(input.repoRootPath, null);
   assert.equal(input.charter, ONBOARDING_AGENT_CHARTER);
-  assert.ok(input.charter.startsWith(defaultSupervisedCharter), "the first agent keeps the usual team rules");
-  assert.match(input.charter, /what LetAgents is/);
+  // The room shows it as the person's own first message: short, in their voice, and it asks what LetAgents is.
+  assert.ok(input.charter.length <= 200);
+  assert.match(input.charter, /what is LetAgents/);
   assert.equal(input.permissionProfileId, "read_only");
   assert.equal((input.launchPolicy as { permissionMode?: string }).permissionMode, "dontAsk");
   assert.equal(input.model, null);
@@ -159,6 +160,65 @@ test("a provider that is not signed in fails the connect task clearly", async ()
   bridge.setStatus("ready");
   assert.equal(await firstRoom.run({ providerId: "claude-code", organizationId: null }), true);
   firstRoom.reset();
+  assert.equal(firstRoom.state.value, "idle");
+  assert.equal(firstRoom.room.value, null);
+});
+
+function installStorage() {
+  const store = new Map<string, string>();
+  (globalThis as { localStorage?: unknown }).localStorage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => { store.set(key, value); },
+    removeItem: (key: string) => { store.delete(key); },
+  };
+  return store;
+}
+
+test("a later try with another company reuses the first room", async () => {
+  const bridge = installBridge({ failCreateAgent: 1 });
+  const firstRoom = useOnboardingFirstRoom();
+  assert.equal(await firstRoom.run({ providerId: "claude-code", organizationId: "42" }), false);
+  assert.equal(await firstRoom.run({ providerId: "claude-code", organizationId: "77" }), true);
+  assert.deepEqual(bridge.calls.filter((call) => call.startsWith("createInviteRoom")), ["createInviteRoom 42"]);
+  assert.equal(bridge.creates[0].creationRequestId, bridge.creates[1].creationRequestId);
+});
+
+test("a quit between tries reuses the saved room and agent request, per account", async () => {
+  const store = installStorage();
+  const bridge = installBridge({ failCreateAgent: 1 });
+  const key = firstRoomProgressKey({ authenticated: true, apiUrl: "https://letagents.chat", account: { id: "u1" } });
+  assert.ok(key);
+  const before = useOnboardingFirstRoom({ storageKey: () => key });
+  assert.equal(await before.run({ providerId: "claude-code", organizationId: "42" }), false);
+  assert.ok(store.get(key!), "progress is saved");
+
+  // The app quit: a new screen for the same account.
+  const after = useOnboardingFirstRoom({ storageKey: () => key });
+  assert.equal(await after.run({ providerId: "claude-code", organizationId: "77" }), true);
+  assert.equal(bridge.calls.filter((call) => call.startsWith("createInviteRoom")).length, 1, "no second Welcome room");
+  assert.equal(after.room.value?.roomIdentifier, "room_1");
+  assert.equal(bridge.creates[0].creationRequestId, bridge.creates[1].creationRequestId, "no second agent");
+
+  // Another account starts its own room.
+  const otherKey = firstRoomProgressKey({ authenticated: true, apiUrl: "https://letagents.chat", account: { id: "u2" } });
+  const other = useOnboardingFirstRoom({ storageKey: () => otherKey });
+  assert.equal(await other.run({ providerId: "claude-code", organizationId: null }), true);
+  assert.equal(other.room.value?.roomIdentifier, "room_2");
+
+  after.forget();
+  assert.equal(store.get(key!), undefined, "finished setup drops its progress");
+  assert.equal(firstRoomProgressKey({ authenticated: false, account: { id: "u1" } }), null);
+  delete (globalThis as { localStorage?: unknown }).localStorage;
+});
+
+test("a reset during a run waits for the run, then clears the screen", async () => {
+  const bridge = installBridge({ holdRoom: true });
+  const firstRoom = useOnboardingFirstRoom();
+  const run = firstRoom.run({ providerId: "claude-code", organizationId: null });
+  await new Promise((resolve) => setImmediate(resolve));
+  firstRoom.reset();
+  bridge.releaseRoom();
+  await run;
   assert.equal(firstRoom.state.value, "idle");
   assert.equal(firstRoom.room.value, null);
 });
