@@ -51,10 +51,13 @@
       v-else-if="preflight?.nextAction === 'authenticate'"
       type="button"
       class="desktop-add-agent-primary"
-      :disabled="copyingAuthCommand"
-      @click="emit('copy-auth-command')"
+      data-testid="desktop-add-agent-sign-in-button"
+      :disabled="signInState === 'starting' || signInState === 'waiting' || signInState === 'verifying'"
+      @click="emit('sign-in')"
     >
-      {{ copyingAuthCommand ? "Copying..." : "Copy sign-in command" }}
+      {{ signInState === "starting" || signInState === "waiting" || signInState === "verifying"
+        ? "Signing in..."
+        : signInState === "failed" ? "Try again" : "Sign in" }}
     </button>
     <button
       v-else-if="preflight?.nextAction === 'choose_repo'"
@@ -149,6 +152,7 @@ import type {
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
+  DesktopProviderSignInState,
 } from "../../../../../../electron/ipc-types";
 import { hasSupervisedRuntime } from "../../../../domain/managed-agents";
 import type { AddAgentSupervisedUi } from "./useAddAgentController";
@@ -161,6 +165,7 @@ const props = defineProps<{
   setupBusy: boolean;
   setupActionLabel: string;
   copyingAuthCommand: boolean;
+  signInState?: DesktopProviderSignInState | null;
   installCommand?: string | null;
   installUrl?: string | null;
   canCreateWorktree: boolean;
@@ -178,7 +183,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "setup-action": [action: DesktopAgentProviderSetupAction];
-  "copy-auth-command": [];
+  "sign-in": [];
   "copy-install-command": [];
   "open-install-guide": [];
   refresh: [];

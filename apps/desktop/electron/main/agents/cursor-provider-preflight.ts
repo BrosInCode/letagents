@@ -38,6 +38,7 @@ import { assertSupervisedWorkspaceGenerationSupported } from "#provider-runtime/
 import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "#provider-runtime/paths.js";
 import { desktopRuntimeEnvironment } from "#provider-runtime/desktop-shell-environment.js";
 import { missingExternalRuntimePreflight } from "./external-runtime-preflight.js";
+import { providerCli } from "./provider-cli.js";
 
 type ExecResult = {
   ok: boolean;
@@ -79,9 +80,7 @@ export async function runDesktopCursorProviderPreflight(
 ): Promise<DesktopAgentProviderPreflight> {
   const timeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
   const runtimeEnv = options.runtimeEnvironment ?? desktopRuntimeEnvironment();
-  const command = runtimeEnv.LETAGENTS_CURSOR_AGENT_BIN ||
-    provider.runtimeCommand ||
-    "cursor-agent";
+  const { command } = providerCli(provider.id, provider.runtimeCommand, runtimeEnv);
   const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
     execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {

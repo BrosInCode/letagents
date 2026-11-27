@@ -25,7 +25,6 @@ import {
   firstRedactedCodexAppServerOutputLine,
   sensitiveCodexAppServerEnvValues,
 } from "#provider-runtime/agents/codex-app-server.js";
-import { resolveCodexExecutable } from "#provider-runtime/agents/codex-executable.js";
 import { cachedProbe, clearProbeCache, probeKey } from "#provider-runtime/provider-probe-cache.js";
 import {
   openCodeInstallCommand,
@@ -42,17 +41,17 @@ import {
   branchScopedGitRoomName,
   gitRoomFromBranchRoomIdentifier,
 } from "./managed-agent-branch-scope.js";
-import { claudeApprovalProfileLabel, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "#provider-runtime/agents/claude-code-version.js";
+import { claudeApprovalProfileLabel, inspectClaudeCodeVersion } from "#provider-runtime/agents/claude-code-version.js";
 import {
   getDesktopAgentProvider,
   isDesktopAgentProviderId,
 } from "./provider-registry.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
 import { missingExternalRuntimePreflight } from "./external-runtime-preflight.js";
-import { ANTIGRAVITY_MIN_VERSION, antigravityChildEnvironment, antigravityVersionAtLeast, parseAntigravityVersion, resolveAntigravityExecutable } from "#provider-runtime/agents/antigravity/launch.js";
+import { providerCli } from "./provider-cli.js";
+import { ANTIGRAVITY_MIN_VERSION, antigravityVersionAtLeast, parseAntigravityVersion } from "#provider-runtime/agents/antigravity/launch.js";
 import { ownerAntigravityTokenFileExists } from "#provider-runtime/agents/antigravity/sign-in.js";
 import {
-  desktopRuntimeEnvironment,
   desktopShellEnvironmentReady,
   refreshDesktopShellEnvironment,
 } from "#provider-runtime/desktop-shell-environment.js";
@@ -212,8 +211,7 @@ async function codexPreflight(
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const runtimeEnv = desktopRuntimeEnvironment();
-  const resolvedCommand = resolveCodexExecutable({ env: runtimeEnv });
+  const { command: resolvedCommand, env: runtimeEnv } = providerCli(provider.id, provider.runtimeCommand);
   const versionResult = await cachedProbe(probeKey(resolvedCommand, ["--version"]), () =>
     execFileWithTimeout(resolvedCommand, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {
@@ -281,8 +279,7 @@ async function claudeCodePreflight(
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const runtimeEnv = desktopRuntimeEnvironment();
-  const command = resolveClaudeCodeExecutable(runtimeEnv, provider.runtimeCommand || "claude");
+  const { command, env: runtimeEnv } = providerCli(provider.id, provider.runtimeCommand);
   const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
     execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {
@@ -360,7 +357,7 @@ async function claudeCodePreflight(
  * (service "gemini", account "antigravity"). Reading the item's existence
  * reads no secret. Elsewhere there is no safe read, so the launch says it.
  */
-async function antigravitySignInKnownMissing(timeoutMs?: number): Promise<boolean> {
+export async function antigravitySignInKnownMissing(timeoutMs?: number): Promise<boolean> {
   // When the keychain does not answer in time, agy keeps the sign-in in a file instead.
   if (ownerAntigravityTokenFileExists()) return false;
   if (process.platform !== "darwin") return false;
@@ -375,8 +372,7 @@ async function antigravityPreflight(
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const runtimeEnv = antigravityChildEnvironment(desktopRuntimeEnvironment());
-  const command = resolveAntigravityExecutable(runtimeEnv);
+  const { command, env: runtimeEnv } = providerCli(provider.id, provider.runtimeCommand);
   const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
     execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {

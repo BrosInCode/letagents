@@ -357,7 +357,7 @@
       @choose-worktree="openAgentWorktree"
     />
     <AddAgentUnavailableModal v-else :open="addAgentModalOpen" @close="closeAddAgentModal" />
-    <RoomGuidedTour ref="roomGuide" />
+    <RoomGuidedTour ref="roomGuide" :room-identifier="room.identifier" :room-loading="roomLoading" :viewer-name="viewerName" />
   </section>
 </template>
 
