@@ -59,6 +59,7 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
+  DesktopProviderSignInUpdate,
   DesktopSupervisorAttemptDetail,
   DesktopSupervisorAgentConfiguration,
   DesktopSupervisorAgentConfigurationApplyInput,
@@ -663,6 +664,12 @@ export interface DesktopApi {
       providerId: DesktopAgentProviderId,
       input: DesktopAgentProviderSetupInput
     ) => Promise<DesktopAgentProviderSetupResult>;
+    /** Runs the provider's own sign-in; progress arrives through onProviderSignInUpdate. */
+    startProviderSignIn: (providerId: DesktopAgentProviderId) => Promise<DesktopProviderSignInUpdate>;
+    /** Gives the provider a code the user pasted from the browser. */
+    submitProviderSignInCode: (providerId: DesktopAgentProviderId, code: string) => Promise<DesktopProviderSignInUpdate | null>;
+    cancelProviderSignIn: (providerId: DesktopAgentProviderId) => Promise<void>;
+    onProviderSignInUpdate: (callback: (update: DesktopProviderSignInUpdate) => void) => () => void;
   };
   supervisor: {
     listHostToolRules?: (agentId: string) => Promise<import("../../shared/host-tool-rules.js").HostToolRule[]>;

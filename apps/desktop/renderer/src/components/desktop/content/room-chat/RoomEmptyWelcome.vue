@@ -4,7 +4,9 @@
       <div class="welcome-bubble-back"></div>
       <div class="welcome-bubble-front"><i></i><i></i><i></i></div>
     </div>
-    <h3>Welcome to {{ roomName }}{{ viewerName ? `, ${viewerName}` : "" }}.</h3>
+    <!-- A room named "Welcome" (the first room after onboarding) would read "Welcome to Welcome". -->
+    <h3 v-if="/^welcome$/i.test(roomName.trim())">Welcome{{ viewerName ? `, ${viewerName}` : "" }}.</h3>
+    <h3 v-else>Welcome to {{ roomName }}{{ viewerName ? `, ${viewerName}` : "" }}.</h3>
     <p>Send a message to start the conversation.</p>
     <button class="room-tour-start" type="button" aria-haspopup="dialog" @click="$emit('tour')">
       <Compass aria-hidden="true" /> Quick tour <ArrowUpRight aria-hidden="true" />

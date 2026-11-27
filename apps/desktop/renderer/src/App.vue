@@ -4,41 +4,32 @@
   <main
     v-if="!showFirstRunSplash && (showFirstRunGate || (roomArrival && !showSignedOutGate))"
     class="desktop-onboarding-shell"
-    :data-cinematic="firstRunStage === 'welcome' || firstRunStage === 'github'"
+    :data-cinematic="showFirstRunGate"
     :data-room-arrival="showFirstRunGate ? null : roomArrival"
     :inert="!showFirstRunGate"
     :style="[roomTheme.css.value, { '--arrival-sidebar-edge': arrivalSidebarEdge }]"
     data-testid="desktop-first-run-onboarding"
   >
-    <FirstRunOnboardingView
-      :stage="firstRunStage"
-      :company-step="companyStep"
-      :invited-company-id="pendingCompanyInvite"
-      :company-name="company.selected.value?.login"
-      :rooms="firstRunRoomChoices"
-      :save-company-theme="canSetCompanyTheme ? company.changeTheme : undefined"
-      @choose-organization="chooseOnboardingCompany"
-      @retry-organizations="company.refresh"
-      @open-company-github="company.openOnGitHub"
+    <!-- First run: the welcome signs in; owners make their company theirs; the first agent and room are set up. -->
+    <OnboardingFlow
       :auth-status="authStatus"
-      :busy="mcpInstallBusy || authBusy || loading"
       :auth-busy="authBusy || loading"
-      :feedback="firstRunFeedback"
-      :selected-room-identifier="firstRunRoomSelected ? (rootRoomSnapshot?.roomIdentifier || null) : null"
-      :room-needs-github-access="firstRunRoomSelected && rootRoomSnapshot?.access.status === 'auth_required' && !authStatus?.authenticated"
-      @start-setup="startFirstRunSetup"
+      :auth-feedback="firstRunFeedback"
+      :organizations="company.organizations.value"
+      :organizations-status="company.status.value"
+      :organizations-error="company.error.value"
+      :organizations-access="company.status.value === 'github_access_required' ? (company.accessReason.value ?? 'scope') : null"
+      :open-organization-access="() => company.openOnGitHub({ kind: 'allow' })"
+      :refresh-organizations="company.refresh"
+      :selected-company-id="company.activeId.value"
+      :invited-company-id="pendingCompanyInvite"
+      :choose-company="chooseCompanyForOnboarding"
+      :save-company-theme="company.changeTheme"
       @start-auth="startAuthFlow"
-      @open-verification="openVerification"
-      @poll-auth="pollAuthFlow"
       @cancel-auth="cancelAuthFlow"
-      @sign-out="signOut"
-      @continue-to-room="openOnboardingCompanyStep"
-      @continue-theme="continueToRoomConfirmation"
-      @connect-room-auth="startFirstRunRoomAuth"
-      @choose-room="openOnboardingRoom"
-      @new-room="openOnboardingNewRoom"
-      @back="goBackFirstRun"
-      @finish="finishFirstRunOnboarding()"
+      @open-verification="openVerification"
+      :open-room="openOnboardingRoom"
+      :finish="finishOnboardingWithoutRoom"
     />
   </main>
 
@@ -517,7 +508,7 @@ import { isMembershipRefusal } from "./components/desktop/content/auth-onboardin
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialog.vue";
-import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
+import OnboardingFlow from "./components/desktop/onboarding/OnboardingFlow.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -543,6 +534,7 @@ import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAler
 import { useAppMessageNotifications } from "./composables/app/useAppMessageNotifications";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
+import { markFirstRoomTour } from "./domain/first-room-tour";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -569,7 +561,7 @@ const {
   sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
-  company, companyStep, companyInvite, pendingCompanyInvite, chooseOnboardingCompany, copyCompanyLink,
+  company, companyStep, companyInvite, pendingCompanyInvite, chooseOnboardingCompany, completeCompanyInvite, copyCompanyLink,
 } = Object.assign(app, useAppCompany(app));
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshInbox,
@@ -763,6 +755,14 @@ const firstRunRoomChoices = computed(() => company.activeId.value ? company.room
   visibility: null,
 })));
 
+/** The new onboarding's company choice: join (or set up) the company, and finish a company link. */
+async function chooseCompanyForOnboarding(id: string): Promise<boolean> {
+  const invite = pendingCompanyInvite.value;
+  if (!(await company.choose(id))) return false;
+  if (invite === id) await completeCompanyInvite(invite);
+  return true;
+}
+
 function openOnboardingCompanyStep() {
   firstRunStage.value = "organization";
   void app.refreshAccountRooms();
@@ -773,7 +773,17 @@ const roomArrival = ref<"waiting" | "moving" | null>(null);
 const usedRoomFlight = ref(false);
 const arrivalSidebarEdge = ref("0px");
 
-async function openOnboardingRoom(id: string, icon?: HTMLElement) {
+/** Why setup could not close, in the words setup left, else a plain fallback. */
+const onboardingExitError = (fallback: string) => firstRunFeedback.value || fallback;
+
+/** Skip: close setup without a first room. Null once it closed, else why not. */
+async function finishOnboardingWithoutRoom(): Promise<string | null> {
+  await finishFirstRunOnboarding();
+  return !showFirstRunGate.value ? null : onboardingExitError("Couldn’t close setup. Try again.");
+}
+
+/** Open the room setup made and close onboarding. Null once it opened, else why not. */
+async function openOnboardingRoom(id: string, icon?: HTMLElement): Promise<string | null> {
   const flight = prepareFirstRoomFlight(icon, edge => {
     arrivalSidebarEdge.value = `${edge}px`;
     roomArrival.value = "moving";
@@ -786,7 +796,11 @@ async function openOnboardingRoom(id: string, icon?: HTMLElement) {
   if (flight) roomArrival.value = "waiting";
   try {
     const snapshot = await joinRoomCode(id);
-    if (!snapshot || (snapshot.access.status !== "ready" && !isMembershipRefusal(snapshot.access.status))) return;
+    if (!snapshot || (snapshot.access.status !== "ready" && !isMembershipRefusal(snapshot.access.status))) {
+      return onboardingExitError("Couldn’t open your Welcome room. Try again.");
+    }
+    // Only a room that opened gets the tour; the room shell mounts after setup closes below.
+    markFirstRoomTour(id);
     const openedEntryId = activeEntry.value.id;
     const openedRoomId = normalizeRoomIdentifier(snapshot.roomIdentifier);
     await finishFirstRunOnboarding(snapshot, flight && {
@@ -797,6 +811,7 @@ async function openOnboardingRoom(id: string, icon?: HTMLElement) {
           ? entry.id : null;
       }).finally(clearArrival),
     });
+    return !showFirstRunGate.value ? null : onboardingExitError("Couldn’t close setup. Try again.");
   } finally {
     clearArrival();
   }

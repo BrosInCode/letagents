@@ -8,6 +8,7 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
+  DesktopProviderSignInUpdate,
   DiagnosticsSnapshot,
   WorkerSnapshot,
 } from "../../ipc-types.js";
@@ -17,9 +18,19 @@ import {
   runDesktopAgentProviderPreflight,
   runDesktopAgentProviderSetup,
 } from "../agents/providers.js";
+import { desktopProviderSignIn } from "../agents/provider-sign-in.js";
+import { isDesktopAgentProviderId } from "../agents/provider-registry.js";
 import { buildDiagnosticsSnapshot, buildWorkerSnapshots } from "../rooms.js";
 import { assertDesktopUpdateMutationAllowed } from "../updates.js";
+import { emitToMainWindow } from "../window.js";
 import { gateSupervisedAgentIpc } from "./supervised-agent-gate.js";
+
+function signInProviderId(providerId: unknown): DesktopAgentProviderId {
+  if (typeof providerId !== "string" || !isDesktopAgentProviderId(providerId)) {
+    throw new Error(`Unknown agent provider: ${String(providerId)}`);
+  }
+  return providerId;
+}
 
 export function registerDesktopWorkerIpcHandlers(ipcMain: IpcMain): void {
   // Agent providers need supervised agents; the worker and diagnostics views do not.
@@ -62,6 +73,24 @@ export function registerDesktopWorkerIpcHandlers(ipcMain: IpcMain): void {
       assertDesktopUpdateMutationAllowed();
       return runDesktopAgentProviderSetup(providerId, input);
     },
+  );
+  desktopProviderSignIn.onUpdate((update) => emitToMainWindow("desktop:workers:provider-sign-in-update", update));
+  targetIpcMain.handle(
+    "desktop:workers:start-provider-sign-in",
+    async (_event, providerId: DesktopAgentProviderId): Promise<DesktopProviderSignInUpdate> => {
+      assertDesktopUpdateMutationAllowed();
+      return desktopProviderSignIn.start(signInProviderId(providerId));
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:workers:submit-provider-sign-in-code",
+    async (_event, providerId: DesktopAgentProviderId, code: string): Promise<DesktopProviderSignInUpdate> =>
+      desktopProviderSignIn.submitCode(signInProviderId(providerId), code),
+  );
+  targetIpcMain.handle(
+    "desktop:workers:cancel-provider-sign-in",
+    async (_event, providerId: DesktopAgentProviderId): Promise<void> =>
+      desktopProviderSignIn.cancel(signInProviderId(providerId)),
   );
   targetIpcMain.handle(
     "desktop:diagnostics:get-snapshot",

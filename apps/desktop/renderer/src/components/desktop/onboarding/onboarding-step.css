@@ -1,0 +1,70 @@
+/* The frame every onboarding screen after the welcome shares: the same dark room, the same
+   places for the brand, the heading and the actions, so the screens read as one place. */
+.onb-step {
+  --ink: #efeee6; --ink-2: rgba(239, 238, 230, .56); --ink-3: rgba(239, 238, 230, .3);
+  --mint: #7fe0bd; --edge: clamp(28px, 6vw, 96px); --ease: cubic-bezier(.23, 1, .32, 1);
+  position: relative; isolation: isolate; overflow: hidden;
+  display: grid; grid-template-rows: 1fr auto; width: 100%; min-height: 100dvh; box-sizing: border-box;
+  padding: 0 var(--edge); background: #0a0b0a; color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+.onb-step::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background: radial-gradient(120% 90% at 50% 42%, transparent 55%, rgba(0, 0, 0, .55));
+}
+.onb-grain { position: absolute; inset: 0; z-index: -1; opacity: .045; pointer-events: none; }
+.onb-drag { position: absolute; inset: 0 0 auto; height: 40px; -webkit-app-region: drag; }
+.onb-brand {
+  position: absolute; top: var(--welcome-brand-top, 16px); left: clamp(16px, 4vw, 56px);
+  display: flex; align-items: center; gap: 8px; min-height: 36px; font-weight: 640;
+}
+html[data-window-chrome="mac"] .onb-brand { top: 42px; }
+/* The logo fills its box; the box sets the size. */
+.onb-brand-mark { display: block; width: 24px; height: 24px; flex: 0 0 24px; }
+
+.onb-bottom {
+  grid-row: 2; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 32px;
+  padding-bottom: clamp(36px, 7vh, 72px);
+}
+.onb-left { display: grid; justify-items: start; min-width: 0; max-width: 760px; }
+.onb-heading {
+  margin: 0; font-family: "Iowan Old Style", "New York", ui-serif, Georgia, serif;
+  font-size: clamp(42px, 5.6vw, 76px); font-weight: 400; line-height: .98; letter-spacing: -.038em;
+  font-feature-settings: "kern", "liga";
+}
+.onb-heading:focus { outline: none; }
+.onb-note { margin: 20px 0 0; color: var(--ink-2); font: 400 15px/1.55 ui-sans-serif, system-ui, sans-serif; }
+.onb-note strong { color: var(--ink); font-weight: 520; }
+.onb-feedback { margin: 16px 0 0; color: #f0a48a; font: 400 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+
+.onb-actions { display: flex; align-items: center; gap: 22px; -webkit-app-region: no-drag; }
+.onb-quiet {
+  padding: 6px 4px; border: 0; background: none; color: var(--ink-2);
+  font: 400 14px/1 ui-sans-serif, system-ui, sans-serif; cursor: pointer; transition: color 160ms ease;
+}
+.onb-quiet:hover:not(:disabled) { color: var(--ink); }
+.onb-quiet:disabled { opacity: .4; cursor: default; }
+.onb-quiet:focus-visible { outline: 2px solid rgba(127, 224, 189, .8); outline-offset: 3px; border-radius: 6px; }
+.onb-primary {
+  display: inline-flex; align-items: center; gap: 10px; height: 48px; padding: 0 20px 0 22px;
+  border: 0; border-radius: 12px; cursor: pointer; white-space: nowrap;
+  background: linear-gradient(#f5f4ee, #e6e4db); color: #0b0c0b;
+  font: 560 15px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: -.01em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .8), inset 0 -1px 0 rgba(0, 0, 0, .12),
+    0 1px 2px rgba(0, 0, 0, .5), 0 12px 32px -12px rgba(236, 228, 205, .35);
+  transition: transform 160ms var(--ease), opacity 200ms ease;
+}
+.onb-primary svg { width: 17px; height: 17px; }
+.onb-primary:active:not(:disabled) { transform: scale(.97); }
+.onb-primary:disabled { opacity: .4; cursor: default; }
+.onb-primary:focus-visible { outline: 2px solid rgba(127, 224, 189, .8); outline-offset: 3px; }
+.onb-spin { width: 13px; height: 13px; animation: onb-spin 900ms linear infinite; }
+@keyframes onb-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .onb-spin { animation-duration: 2.4s; }
+  .onb-primary { transition: opacity 150ms linear; }
+}
+@media (max-width: 740px) {
+  .onb-bottom { grid-template-columns: 1fr; }
+}

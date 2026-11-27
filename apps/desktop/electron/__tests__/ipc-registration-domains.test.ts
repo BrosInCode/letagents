@@ -261,11 +261,14 @@ const expectedDirectChannels = [
   "desktop:updates:check",
   "desktop:updates:get-status",
   "desktop:updates:install",
+  "desktop:workers:cancel-provider-sign-in",
   "desktop:workers:list",
   "desktop:workers:list-agent-provider-models",
   "desktop:workers:list-agent-providers",
   "desktop:workers:run-agent-provider-preflight",
   "desktop:workers:run-agent-provider-setup",
+  "desktop:workers:start-provider-sign-in",
+  "desktop:workers:submit-provider-sign-in-code",
 ] as const;
 
 function readDomainSource(domain: string): string {
@@ -420,6 +423,7 @@ test("application registers startup preparation before rental recovery without d
     mock.module("../main/updates.js", { namedExports: { initializeDesktopUpdates() {}, stopDesktopUpdates() {} } }),
     mock.module("../rental/provider-host-manager.js", { namedExports: { stopActiveRentalProviderHostManager: async () => {} } }),
     mock.module("../rental/provider-event-poller.js", { namedExports: { stopActiveRentalProviderEventPoller: async () => {} } }),
+    mock.module("../main/agents/provider-sign-in.js", { namedExports: { desktopProviderSignIn: { cancelAll() {} } } }),
   ];
   try {
     await import("../main.js");
