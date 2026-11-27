@@ -197,10 +197,12 @@ html[data-window-chrome="mac"] .desktop-room-header :is(button, a, input, select
 }
 /* A drag area takes every click on it, even under a menu, dialog or backdrop
    that sits on top, unless that layer says no-drag. Keep such layers
-   clickable: a backdrop click must still close its dialog. */
+   clickable: a backdrop click must still close its dialog. The class match
+   covers every "...-backdrop" and "...-scrim" overlay; do not use those words
+   in class names of things inside a drag area. */
 html[data-window-chrome="mac"] :is(
   [role="menu"], [role="dialog"], [role="listbox"], [aria-modal="true"], dialog,
-  [class*="backdrop"], [class*="scrim"], .room-selection-popover, .work-filter-menu, .live-demo-overlay
+  [class*="backdrop"], [class*="scrim"], .room-selection-popover, .work-filter-menu
 ) {
   -webkit-app-region: no-drag;
 }
