@@ -512,6 +512,7 @@ import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialo
 import OnboardingFlow from "./components/desktop/onboarding/OnboardingFlow.vue";
 import { useFilmGrainBehind } from "./components/desktop/onboarding/useFilmGrain";
 import { useAppAppearance } from "./composables/useAppAppearance";
+import { useRootStyle } from "./composables/useRootStyle";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -744,6 +745,8 @@ const roomCompany = computed<RoomCompanyAppearance | null>(() => {
   return company.resolveRoomAppearance(roomAppearance);
 });
 const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
+// Menus and dialogs moved to <body> follow the theme too.
+useRootStyle(() => roomTheme.css.value);
 // Demo: the onboarding film grain as the app background.
 const appGrain = useFilmGrainBehind();
 useAppAppearance(appGrain);

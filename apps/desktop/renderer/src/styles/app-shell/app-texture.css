@@ -13,7 +13,7 @@
   --bg: light-dark(#fff, #000);
   --bg-subtle: light-dark(#fafafa, #060606);
   --bg-card: light-dark(#f4f4f5, #0b0b0b);
-  --bg-elevated: light-dark(#fff, #111);
+  --bg-elevated: var(--workspace-elevated, light-dark(#fff, #111));
   --code-bg: light-dark(#f4f4f5, #0b0b0b);
   --code-header-bg: light-dark(#ebecee, #111);
   background: light-dark(#fff, #000);
