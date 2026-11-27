@@ -47,3 +47,13 @@ html:has(.desktop-shell[data-app-texture]) body {
 ) {
   background: transparent;
 }
+
+/*
+ * Chat bubbles carry the same grain over their own colour. A background
+ * image always paints under the text, so the words stay clean. Same cached
+ * tile as the shell: no extra work per bubble. The long selector outranks
+ * the role rules, whose `background` shorthand would clear the image.
+ */
+.desktop-shell[data-app-texture="grain"] .room-chat-message > .room-chat-message-content > .room-message-line > .room-message-bubble {
+  background-image: var(--app-grain, none);
+}
