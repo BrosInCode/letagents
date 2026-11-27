@@ -1,7 +1,7 @@
-import { execFile, type ChildProcess } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync, type ChildProcess } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { execProviderFile } from "../../../../../shared/provider-executable.mjs";
 import { signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
@@ -153,21 +153,61 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+/** What a Terminal sign-in started, so the app can end it when the sign-in ends. */
+export interface TerminalSignInHandle {
+  stop: () => void;
+}
+
+/**
+ * Ends the provider that a Terminal sign-in started, once: after a sign-in,
+ * a cancel or the time limit, a provider left running in that window would
+ * keep a second session open. The recorded process must still be that
+ * provider, so a reused process ID is never signalled.
+ */
+export function stopTerminalSignIn(pidFolder: string, command: string): void {
+  try {
+    const pid = Number(readFileSync(join(pidFolder, "pid"), "utf8").trim());
+    if (Number.isInteger(pid) && pid > 1) {
+      const name = execFileSync("/bin/ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8", timeout: 2_000 }).trim();
+      if (name && basename(name) === basename(command)) process.kill(pid, "SIGTERM");
+    }
+  } catch {
+    // Not started yet, already ended, or not ours: nothing to stop.
+  }
+  rmSync(pidFolder, { recursive: true, force: true });
+}
+
 /** Opens macOS Terminal on the provider, with the provider's home and PATH. The script deletes itself when it runs. */
-async function openTerminalSignIn(plan: ProviderSignInPlan): Promise<void> {
+async function openTerminalSignIn(plan: ProviderSignInPlan): Promise<TerminalSignInHandle> {
   const folder = mkdtempSync(join(tmpdir(), "letagents-sign-in-"));
+  const pidFolder = mkdtempSync(join(tmpdir(), "letagents-sign-in-pid-"));
   const script = join(folder, `Sign in to ${plan.providerName}.command`);
   const keys = ["HOME", "PATH", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "AGY_CLI_DISABLE_AUTO_UPDATE"];
   writeFileSync(script, [
     "#!/bin/sh",
     `rm -rf -- ${shellQuote(folder)}`,
+    // exec keeps this process ID, so it becomes the provider's.
+    `echo $$ > ${shellQuote(join(pidFolder, "pid"))}`,
     ...keys.flatMap((key) => plan.env[key] ? [`export ${key}=${shellQuote(plan.env[key]!)}`] : []),
     `exec ${shellQuote(plan.command)} ${plan.args.map(shellQuote).join(" ")}`.trimEnd(),
     "",
   ].join("\n"), { mode: 0o700 });
-  await new Promise<void>((resolve, reject) => {
-    execFile("/usr/bin/open", ["-a", "Terminal", script], (error) => (error ? reject(error) : resolve()));
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile("/usr/bin/open", ["-a", "Terminal", script], (error) => (error ? reject(error) : resolve()));
+    });
+  } catch (error) {
+    rmSync(pidFolder, { recursive: true, force: true });
+    throw error;
+  }
+  let stopped = false;
+  return {
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      stopTerminalSignIn(pidFolder, plan.command);
+    },
+  };
 }
 
 function spawnSignInProcess(plan: ProviderSignInPlan): ChildProcess {
@@ -192,7 +232,7 @@ export interface ProviderSignInDependencies {
   resolvePlan: (providerId: DesktopAgentProviderId) => ProviderSignInPlan | Promise<ProviderSignInPlan>;
   spawnProcess: (plan: ProviderSignInPlan) => ChildProcess;
   stopProcess: (child: ChildProcess) => void;
-  openTerminal: (plan: ProviderSignInPlan) => Promise<void>;
+  openTerminal: (plan: ProviderSignInPlan) => Promise<TerminalSignInHandle | void>;
   /** Runs after a verified sign-in, before the signed_in update: the next preflight must probe again. */
   onSignedIn: (providerId: DesktopAgentProviderId) => void;
   timeoutMs: number;
@@ -209,6 +249,8 @@ interface SignInSession {
   outputSinceCode: string;
   timeout: NodeJS.Timeout | null;
   poll: NodeJS.Timeout | null;
+  /** The provider a Terminal sign-in started: ended with the sign-in. */
+  terminal: TerminalSignInHandle | null;
   finished: boolean;
 }
 
@@ -257,6 +299,7 @@ export class ProviderSignInService {
       outputSinceCode: "",
       timeout: null,
       poll: null,
+      terminal: null,
       finished: false,
     };
     this.sessions.set(providerId, session);
@@ -354,8 +397,13 @@ export class ProviderSignInService {
   }
 
   private async startTerminal(session: SignInSession, plan: ProviderSignInPlan): Promise<void> {
-    await this.deps.openTerminal(plan);
-    if (session.finished) return;
+    const terminal = await this.deps.openTerminal(plan);
+    if (session.finished) {
+      // Cancelled while Terminal opened.
+      try { terminal?.stop(); } catch { /* best effort */ }
+      return;
+    }
+    session.terminal = terminal || null;
     session.update = {
       ...session.update,
       state: "waiting",
@@ -406,6 +454,9 @@ export class ProviderSignInService {
     if (session.poll) clearTimeout(session.poll);
     session.timeout = null;
     session.poll = null;
+    const terminal = session.terminal;
+    session.terminal = null;
+    try { terminal?.stop(); } catch { /* best effort */ }
     const child = session.child;
     session.child = null;
     if (child) {

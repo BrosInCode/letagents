@@ -1,8 +1,10 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import type { ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -12,6 +14,7 @@ import {
   parseSignInOutput,
   ProviderSignInService,
   resolveProviderSignInPlan,
+  stopTerminalSignIn,
   type ProviderSignInDependencies,
   type ProviderSignInPlan,
 } from "../main/agents/provider-sign-in.js";
@@ -252,6 +255,72 @@ test("a Terminal sign-in checks the provider until it is signed in", async () =>
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(checks, 2);
   assert.deepEqual(order, ["starting", "terminal", "waiting", "probe-cache-cleared", "signed_in"]);
+});
+
+test("a Terminal sign-in ends the provider it started when it signs in, is cancelled or runs out of time", async () => {
+  const run = async (finishWith: "signed_in" | "cancel" | "timeout") => {
+    let stops = 0;
+    const { service, updates } = harness({
+      plan: plan({ mode: "terminal", providerName: "Antigravity", command: "/fake/agy", args: [], verify: async () => finishWith === "signed_in" }),
+      deps: {
+        openTerminal: async () => ({ stop: () => { stops += 1; } }),
+        timeoutMs: finishWith === "timeout" ? 20 : 60_000,
+      },
+    });
+    await service.start("antigravity");
+    assert.equal(stops, 0, "the provider runs while the person signs in");
+    if (finishWith === "cancel") service.cancel("antigravity");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    service.cancelAll();
+    return { stops, state: updates.at(-1)!.state };
+  };
+  assert.deepEqual(await run("signed_in"), { stops: 1, state: "signed_in" });
+  assert.deepEqual(await run("cancel"), { stops: 1, state: "cancelled" });
+  assert.deepEqual(await run("timeout"), { stops: 1, state: "failed" });
+});
+
+test("a cancel while Terminal opens still ends the provider that opens", async () => {
+  let stops = 0;
+  let opened!: () => void;
+  const { service, updates } = harness({
+    plan: plan({ mode: "terminal", providerName: "Antigravity", command: "/fake/agy", args: [], verify: async () => false }),
+    deps: {
+      openTerminal: () => new Promise((resolve) => {
+        opened = () => resolve({ stop: () => { stops += 1; } });
+      }),
+    },
+  });
+  const started = service.start("antigravity");
+  await settle();
+  service.cancel("antigravity");
+  opened();
+  await started;
+  assert.equal(stops, 1);
+  assert.equal(updates.at(-1)!.state, "cancelled");
+});
+
+test("stopping a Terminal sign-in signals only the recorded provider process", { skip: process.platform === "win32" }, async () => {
+  const folder = () => mkdtempSync(join(tmpdir(), "sign-in-pid-test-"));
+  const sleeper = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+  const exited = new Promise<NodeJS.Signals | null>((resolve) => sleeper.once("exit", (_code, signal) => resolve(signal)));
+  try {
+    const other = folder();
+    writeFileSync(join(other, "pid"), String(sleeper.pid));
+    stopTerminalSignIn(other, "/fake/agy");
+    assert.equal(sleeper.exitCode, null, "a process that is not the provider is left alone");
+    assert.equal(existsSync(other), false, "the record is removed either way");
+
+    const mine = folder();
+    writeFileSync(join(mine, "pid"), String(sleeper.pid));
+    stopTerminalSignIn(mine, "/usr/local/bin/sleep");
+    assert.equal(await exited, "SIGTERM");
+    assert.equal(existsSync(mine), false);
+
+    const missing = folder();
+    assert.doesNotThrow(() => stopTerminalSignIn(missing, "/fake/agy"), "no record yet is not an error");
+  } finally {
+    sleeper.kill("SIGKILL");
+  }
 });
 
 test("sign-in runs each provider's program in the environment its preflight uses", () => {
