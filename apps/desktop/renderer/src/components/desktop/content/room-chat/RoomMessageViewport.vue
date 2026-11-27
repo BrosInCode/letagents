@@ -104,11 +104,11 @@
 
       <Transition name="room-empty">
         <RoomEmptyWelcome
-          v-if="!roomLoading && !messages.length && !displayedAgentWork.length && roomIdentifier && roomLabel && !hasFilteredRoomActivity"
+          v-if="!roomLoading && roomIsEmpty && roomIdentifier && roomLabel && !hasFilteredRoomActivity"
           :key="roomIdentifier" :room-name="roomLabel" :viewer-name="viewerName" @tour="emit('open-tour')"
         />
       </Transition>
-      <article v-if="!roomLoading && !messages.length && !displayedAgentWork.length && (!roomIdentifier || !roomLabel || hasFilteredRoomActivity)" class="room-empty-card" data-testid="room-chat-empty">
+      <article v-if="!roomLoading && roomIsEmpty && (!roomIdentifier || !roomLabel || hasFilteredRoomActivity)" class="room-empty-card" data-testid="room-chat-empty">
         <h3>{{ emptyStateTitle }}</h3>
         <p>{{ emptyStateDescription }}</p>
       </article>
@@ -519,6 +519,9 @@ const windowGapElement = ref<HTMLElement | null>(null);
 let renderedWindowStartId: string | null = null;
 let windowGrowthPending = false;
 let windowJumpRequest = 0;
+// Empty means nothing at all in the timeline: an agent's first message or its startup row counts too.
+const roomIsEmpty = computed(() => !props.messages.length && !displayedAgentWork.value.length
+  && !timelineEntries.value.some(entry => entry.type !== "date"));
 
 // False until a window has rendered, so the first message load cannot fix it.
 let renderedWindowAtTop = false;
