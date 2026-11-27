@@ -173,7 +173,7 @@
                 @open-install-guide="openProviderInstallGuide"
                 @refresh="retryProviderSetup"
                 @create-worktree="createWorktree"
-                @start="startManagedAgent"
+                @start="startWithFreeName"
                 @recover-launch="handleRecoverSupervisedLaunch"
               />
 
@@ -220,5 +220,11 @@ const { configuredName, configuredAvatar, roomLabel, providers, selectedProvider
 
 const { dialogElement, openModelSettings, handleAfterLeave, handleDialogTab, handleRecoverSupervisedLaunch, step, identityError, takenNames, identityAvatar, motionPaused, turnBody, turnStage, turning, showStep } = useAgentSetupPresentation(props, configuredName, configuredAvatar, supervisedUi);
 
+// The room's names can arrive while Brain is open. A name that became taken
+// goes back to Identity, where its warning shows, instead of starting.
+function startWithFreeName(): void {
+  if (identityError.value) { showStep('identity'); return; }
+  void startManagedAgent();
+}
 </script>
 <style scoped src="./add-agent/AddAgentRefresh.css"></style>

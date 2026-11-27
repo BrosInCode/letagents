@@ -1030,6 +1030,29 @@ test("a supervised agent that was in the room before keeps a name a person also 
   assert.equal(minted.body.display_name_reassigned, false);
 });
 
+test("an agent that was steered off a person's name does not take it on a later start", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  await authDb!.upsertRoomParticipant({ room_id: room.id, participant_key: "human:sage", kind: "human",
+    github_login: "sage", display_name: "sage" });
+  const body = { generation: 1, room_id: room.id, agent_key: agent.canonical_key,
+    agent_instance_id: "daemon:steered", display_name: "Sage", ide_label: "Codex" };
+  const first = recorder();
+  await mint({ ...reqBase, body }, first);
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  assert.equal(first.body.display_name_reassigned, true);
+  // The agent is now in the room under its assigned name, and the supervisor
+  // lost that name: it was stopped and asks for "Sage" again.
+  await authDb!.upsertRoomParticipant({ room_id: room.id, participant_key: `agent:${agent.canonical_key}`, kind: "agent",
+    agent_key: agent.canonical_key, display_name: first.body.display_name, actor_label: first.body.actor_label });
+  await authDb!.endRoomAgentSession({ session_id: first.body.session_id, room_id: room.id });
+  const again = recorder();
+  await mint({ ...reqBase, body }, again);
+  assert.equal(again.statusCode, 201, JSON.stringify(again.body));
+  assert.equal(again.body.display_name_reassigned, true);
+  assert.notEqual(again.body.display_name.toLowerCase(), "sage");
+});
+
 test("live workers that already share a name converge by renaming only the newer one", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
