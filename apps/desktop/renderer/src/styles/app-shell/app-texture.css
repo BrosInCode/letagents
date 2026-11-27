@@ -1,0 +1,47 @@
+/*
+ * Demo: the onboarding film grain as the app's own background, on black.
+ * The same noise tile and strength as the onboarding screens (4.5%), laid
+ * once over the whole shell so every surface shares it. It takes no pointer
+ * events, so nothing under it changes behaviour.
+ */
+.desktop-shell[data-app-texture="grain"] {
+  --bg: #000;
+  --bg-subtle: #060606;
+  --bg-card: #0b0b0b;
+  --bg-elevated: #111;
+  --code-bg: #0b0b0b;
+  --code-header-bg: #111;
+  background: #000;
+}
+
+html:has(.desktop-shell[data-app-texture="grain"]),
+html:has(.desktop-shell[data-app-texture="grain"]) body {
+  background: #000;
+}
+
+.desktop-app-grain,
+.desktop-app-vignette {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.desktop-app-grain {
+  opacity: 0.045;
+}
+
+/* The onboarding's soft edge darkening, kept light so edge text stays clear. */
+.desktop-app-vignette {
+  background: radial-gradient(120% 90% at 55% 42%, transparent 60%, rgba(0, 0, 0, 0.35));
+}
+
+/*
+ * A room theme sets its canvas and sidebar on the shell's inline style. Set
+ * black on the shell's children instead, so it wins there; the theme keeps
+ * its accent, bubbles, composer and borders.
+ */
+.desktop-shell[data-app-texture="grain"] > * {
+  --workspace-canvas: #000;
+  --workspace-sidebar: #000;
+}

@@ -58,7 +58,10 @@
     :data-room-theme="roomTheme.effective.value"
     :inert="roomArrival === 'waiting'"
     data-testid="desktop-shell"
+    data-app-texture="grain"
   >
+    <div class="desktop-app-grain" :style="{ backgroundImage: appGrain }" aria-hidden="true" />
+    <div class="desktop-app-vignette" aria-hidden="true" />
     <Transition name="desktop-sidebar">
       <div
         v-show="!isSettingsSurface && sidebarMode !== 'hidden'"
@@ -509,6 +512,7 @@ import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutV
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialog.vue";
 import OnboardingFlow from "./components/desktop/onboarding/OnboardingFlow.vue";
+import { useFilmGrain } from "./components/desktop/onboarding/useFilmGrain";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -741,6 +745,8 @@ const roomCompany = computed<RoomCompanyAppearance | null>(() => {
   return company.resolveRoomAppearance(roomAppearance);
 });
 const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
+// Demo: the onboarding film grain as the app background.
+const appGrain = useFilmGrain();
 // An older API does not return a revision or expose the company theme write route.
 const canSetCompanyTheme = computed(() => company.organizations.value.some(org =>
   org.github_org_id === roomCompany.value?.id && org.setup && org.role === "owner"

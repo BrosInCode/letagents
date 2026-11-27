@@ -9,6 +9,7 @@
 @import "./styles/app-shell/main-content.css";
 @import "./styles/app-shell/new-room-modal.css";
 @import "./styles/app-shell/motion.css";
+@import "./styles/app-shell/app-texture.css";
 @import "./styles/03-room-shell.css";
 @import "./styles/04-room-chat-stream.css";
 @import "./styles/06-task-board.css";
