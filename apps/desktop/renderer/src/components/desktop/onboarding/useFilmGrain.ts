@@ -25,3 +25,35 @@ export function useFilmGrain() {
   });
   return grain;
 }
+
+// Tiles with the strength baked into each pixel, by strength.
+const behindTiles = new Map<number, string>();
+
+/**
+ * The same grain as a tile that is already faint, so it can be a plain
+ * background under content instead of a faded layer on top of it. Over black
+ * it matches the onboarding grain at `strength`.
+ */
+export function useFilmGrainBehind(strength = 0.045) {
+  const grain = ref(behindTiles.has(strength) ? `url(${behindTiles.get(strength)})` : "");
+  onMounted(() => {
+    if (!behindTiles.has(strength)) {
+      const tile = document.createElement("canvas");
+      tile.width = tile.height = 160;
+      const context = tile.getContext("2d");
+      if (!context) return;
+      const image = context.createImageData(160, 160);
+      const alpha = Math.round(255 * strength);
+      for (let i = 0; i < image.data.length; i += 4) {
+        const value = Math.random() * 255;
+        image.data[i] = image.data[i + 1] = image.data[i + 2] = value;
+        image.data[i + 3] = alpha;
+      }
+      context.putImageData(image, 0, 0);
+      behindTiles.set(strength, tile.toDataURL());
+    }
+    grain.value = `url(${behindTiles.get(strength)})`;
+  });
+  return grain;
+}
+

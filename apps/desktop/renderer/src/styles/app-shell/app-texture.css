@@ -1,47 +1,49 @@
 /*
- * Demo: the onboarding film grain as the app's own background, on black.
- * The same noise tile and strength as the onboarding screens (4.5%), laid
- * once over the whole shell so every surface shares it. It takes no pointer
- * events, so nothing under it changes behaviour.
+ * The app background: pure black in dark mode, white in light mode. With
+ * "Textured" (Settings → Styling), the onboarding film grain and a soft
+ * vignette are the shell's own background, under all content: nothing is
+ * laid over text. The large panels are see-through so the shell background
+ * shows; cards, bubbles, the composer and menus keep their colour.
  */
+.desktop-shell[data-app-texture] {
+  --bg: light-dark(#fff, #000);
+  --bg-subtle: light-dark(#fafafa, #060606);
+  --bg-card: light-dark(#f4f4f5, #0b0b0b);
+  --bg-elevated: light-dark(#fff, #111);
+  --code-bg: light-dark(#f4f4f5, #0b0b0b);
+  --code-header-bg: light-dark(#ebecee, #111);
+  background: light-dark(#fff, #000);
+}
+
 .desktop-shell[data-app-texture="grain"] {
-  --bg: #000;
-  --bg-subtle: #060606;
-  --bg-card: #0b0b0b;
-  --bg-elevated: #111;
-  --code-bg: #0b0b0b;
-  --code-header-bg: #111;
-  background: #000;
+  background:
+    radial-gradient(120% 90% at 55% 42%, transparent 60%, light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.5))),
+    var(--app-grain, none),
+    light-dark(#fff, #000);
 }
 
-html:has(.desktop-shell[data-app-texture="grain"]),
-html:has(.desktop-shell[data-app-texture="grain"]) body {
-  background: #000;
-}
-
-.desktop-app-grain,
-.desktop-app-vignette {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  pointer-events: none;
-}
-
-.desktop-app-grain {
-  opacity: 0.045;
-}
-
-/* The onboarding's soft edge darkening, kept light so edge text stays clear. */
-.desktop-app-vignette {
-  background: radial-gradient(120% 90% at 55% 42%, transparent 60%, rgba(0, 0, 0, 0.35));
+html:has(.desktop-shell[data-app-texture]),
+html:has(.desktop-shell[data-app-texture]) body {
+  background: light-dark(#fff, #000);
 }
 
 /*
- * A room theme sets its canvas and sidebar on the shell's inline style. Set
- * black on the shell's children instead, so it wins there; the theme keeps
+ * A room theme sets its canvas and sidebar on the shell's inline style; set
+ * them on the shell's children instead, so this wins there. The theme keeps
  * its accent, bubbles, composer and borders.
  */
-.desktop-shell[data-app-texture="grain"] > * {
-  --workspace-canvas: #000;
-  --workspace-sidebar: #000;
+.desktop-shell[data-app-texture] > * {
+  --workspace-canvas: transparent;
+  --workspace-sidebar: transparent;
+}
+
+.desktop-shell[data-app-texture] :is(
+  .app-main,
+  .desktop-room-shell,
+  .desktop-room-header,
+  .desktop-room-control-rail,
+  .focus-room-manager,
+  .desktop-board-panel
+) {
+  background: transparent;
 }

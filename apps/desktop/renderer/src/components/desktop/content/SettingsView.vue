@@ -63,6 +63,7 @@
       </section>
 
       <template v-else-if="activePane === 'system:styling'">
+        <SettingsAppearanceSection />
         <RoomThemeSettings :save-company-theme="saveCompanyTheme" />
         <ChatStylingSettings />
       </template>
@@ -196,6 +197,7 @@
 </template>
 
 <script setup lang="ts">
+import SettingsAppearanceSection from "../settings/SettingsAppearanceSection.vue";
 import { RefreshCw } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
 import type {
