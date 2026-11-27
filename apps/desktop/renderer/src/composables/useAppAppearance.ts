@@ -4,16 +4,17 @@ import { computed, ref, watchEffect, type Ref } from "vue";
 export type AppColorMode = "system" | "light" | "dark";
 
 /**
- * The parts of the app that can carry the film grain, each switched on its
- * own. The id is the word in `data-texture` on <html>; app-texture.css says
- * which elements each one covers. Add a part here and a rule there.
+ * The groups of surfaces that can carry the film grain, each switched on its
+ * own. The id is the word in `data-texture` on <html>. A group is the colour
+ * level a surface is painted with (surface-texture.postcss.ts maps each
+ * colour token to a group), so every element painted that way follows.
  */
 export const TEXTURE_SURFACES = [
-  { id: "background", label: "App background", note: "Behind the sidebar, the chat and the board." },
+  { id: "background", label: "Backgrounds", note: "The app background, pages and full dialogs such as a task." },
+  { id: "cards", label: "Cards and panels", note: "Task cards, settings cards, fields, code and other panels." },
+  { id: "menus", label: "Menus and pop-ups", note: "Right-click menus, pop-ups, small dialogs and notices." },
   { id: "bubbles", label: "Chat bubbles", note: "Every message bubble, under the text." },
   { id: "composer", label: "Message box", note: "Where you write in the room and in threads." },
-  { id: "cards", label: "Cards", note: "Task cards and the other cards in the app." },
-  { id: "menus", label: "Menus and dialogs", note: "Right-click menus, pop-ups, dialogs and notices." },
 ] as const;
 export type TextureSurface = typeof TEXTURE_SURFACES[number]["id"];
 
@@ -89,7 +90,8 @@ export function useAppAppearance(grain?: Readonly<Ref<string>>) {
       root.dataset.theme = resolvedMode.value;
       root.style.colorScheme = resolvedMode.value;
       root.dataset.texture = texturedSurfaces.value.join(" ");
-      root.style.setProperty("--app-grain", grain?.value || "none");
+      // Test pages can lack setProperty; the grain is only looks.
+      root.style.setProperty?.("--app-grain", grain?.value || "none");
     });
   }
 

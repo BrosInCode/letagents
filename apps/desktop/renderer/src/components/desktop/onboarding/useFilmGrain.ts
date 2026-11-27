@@ -10,7 +10,8 @@ export function useFilmGrain() {
     if (!tileUrl) {
       const tile = document.createElement("canvas");
       tile.width = tile.height = 160;
-      const context = tile.getContext("2d");
+      // No canvas (a test page): no grain, nothing else changes.
+      const context = typeof tile.getContext === "function" ? tile.getContext("2d") : null;
       if (!context) return;
       const image = context.createImageData(160, 160);
       for (let i = 0; i < image.data.length; i += 4) {
@@ -40,7 +41,8 @@ export function useFilmGrainBehind(strength = 0.045) {
     if (!behindTiles.has(strength)) {
       const tile = document.createElement("canvas");
       tile.width = tile.height = 160;
-      const context = tile.getContext("2d");
+      // No canvas (a test page): no grain, nothing else changes.
+      const context = typeof tile.getContext === "function" ? tile.getContext("2d") : null;
       if (!context) return;
       const image = context.createImageData(160, 160);
       const alpha = Math.round(255 * strength);

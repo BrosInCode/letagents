@@ -3,6 +3,7 @@ import vue from "@vitejs/plugin-vue";
 import { fileURLToPath, URL } from "node:url";
 import { readFileSync } from "node:fs";
 import rendererBundledPackages from "./renderer-bundled-packages.json";
+import { surfaceTexture } from "./surface-texture.postcss";
 
 type BundledPackages = Record<string, { notices: string[] }>;
 
@@ -28,6 +29,10 @@ export default defineConfig({
       ).join("\n\n") });
     },
   }],
+  css: {
+    // Every surface colour can carry the film grain (Settings → Styling).
+    postcss: { plugins: [surfaceTexture()] },
+  },
   server: {
     host: "127.0.0.1",
     port: 5174,

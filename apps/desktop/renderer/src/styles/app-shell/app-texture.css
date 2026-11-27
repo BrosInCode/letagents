@@ -3,11 +3,11 @@
  * large panels are see-through so the shell background shows; cards,
  * bubbles, the composer and menus keep their colour.
  *
- * Texture: each part of the app listed in TEXTURE_SURFACES
- * (useAppAppearance.ts) has its own switch in Settings → Styling. Its id is
- * a word in `data-texture` on <html>, and one rule below adds the grain tile
- * (`--app-grain`, also on <html>) to that part. The grain is always a
- * background image, so it paints under the text, never over it.
+ * Texture: each group in TEXTURE_SURFACES (useAppAppearance.ts) has its own
+ * switch in Settings → Styling. Its id is a word in `data-texture` on <html>.
+ * A group is a level of surface colour, not a list of classes: see
+ * surface-texture.postcss.ts. The grain is always a background image, so it
+ * paints under the text, never over it.
  */
 .desktop-shell[data-app-texture] {
   --bg: light-dark(#fff, #000);
@@ -53,46 +53,19 @@ html:has(.desktop-shell[data-app-texture]) body {
 }
 
 /*
- * The other parts carry the grain over their own colour. Each selector is
- * stronger than the part's own rules, whose `background` shorthand would
- * otherwise clear the image. Same cached tile everywhere: no extra work.
+ * Every other surface: surface-texture.postcss.ts gives each rule that paints
+ * a surface colour `background-image: var(--grain-<group>, none)`. Turning a
+ * group on here fills that variable with the tile.
  */
-:root[data-texture~="bubbles"] .room-chat-message > .room-chat-message-content > .room-message-line > .room-message-bubble {
-  background-image: var(--app-grain);
-}
+:root[data-texture~="background"] { --grain-background: var(--app-grain); }
+:root[data-texture~="cards"] { --grain-cards: var(--app-grain); }
+:root[data-texture~="menus"] { --grain-menus: var(--app-grain); }
+:root[data-texture~="bubbles"] { --grain-bubbles: var(--app-grain); }
+:root[data-texture~="composer"] { --grain-composer: var(--app-grain); }
 
-/* The welcome bubble is a gradient: keep it under the grain. */
+/* The welcome bubble is a gradient, which the build step leaves alone. */
 :root[data-texture~="bubbles"] .room-first-message-bubble {
   background-image:
     var(--app-grain),
     linear-gradient(125deg, var(--chat-bubble-start), var(--chat-bubble) 48%, var(--chat-bubble-end));
-}
-
-:root[data-texture~="composer"] :is(.desktop-composer, .room-thread-composer) {
-  background-image: var(--app-grain);
-}
-
-:root[data-texture~="cards"] :is(
-  .desktop-task-card,
-  .desktop-task-empty,
-  .action-card,
-  .room-empty-card,
-  .settings-profile-card,
-  .rent-provider-card,
-  .managed-agent-change-card
-) {
-  background-image: var(--app-grain);
-}
-
-:root[data-texture~="menus"] :is(
-  .desktop-context-menu,
-  .room-message-context-menu,
-  .agent-inspector-overflow-menu,
-  .desktop-composer-gif-panel,
-  .desktop-new-room-modal,
-  .room-settings-modal,
-  .desktop-rules-dialog,
-  .desktop-action-toast
-) {
-  background-image: var(--app-grain);
 }
