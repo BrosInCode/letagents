@@ -649,7 +649,7 @@ async function handleLeftRoom(roomName: string) {
   selectedReply.value = null
   leaveRoom()
   toast.info(`You left ${roomName}.`)
-  await router.push('/')
+  await router.push('/new')
 }
 
 async function handleSignIn() {

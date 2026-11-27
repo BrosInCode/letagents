@@ -40,6 +40,10 @@
   --accent-dim: rgba(255, 255, 255, 0.04);
   --accent-hover: rgba(255, 255, 255, 0.08);
   --accent-active: rgba(255, 255, 255, 0.12);
+  --green-text: #4ade80;
+  --blue-text: #60a5fa;
+  --amber-text: #fbbf24;
+  --red-text: #f87171;
   position: relative;
   isolation: isolate;
   background: #0a0a0a;
@@ -49,7 +53,16 @@
 /* An overscroll past the landing page shows the ink's colour, not a light page. */
 html:has(#letagents-app.landing-theme),
 html:has(#letagents-app.landing-theme) body {
+  color-scheme: dark;
   background: #0a0a0a;
+}
+
+/* The room form page (/new) is taller than a phone screen: once it scrolls, the header gets
+   a dark backing so fields never pass under the bare links. The landing page keeps none. */
+[data-route="new-room"].landing-theme .navbar.navbar--scrolled {
+  background: rgba(10, 10, 10, 0.86);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
 }
 
 /* The landing header is not a bar: the brand on the left, quiet text links on the right,

@@ -1,5 +1,5 @@
 <template>
-  <div id="letagents-app" :class="{ 'landing-theme': isLanding }">
+  <div id="letagents-app" :class="{ 'landing-theme': isLanding }" :data-route="String(route.name ?? '')">
     <Navbar v-if="showNavbar" />
     <main>
       <RouterView />

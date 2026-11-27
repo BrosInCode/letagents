@@ -1,4 +1,5 @@
-import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vue-router'
+import { createRouter, createWebHistory } from 'vue-router'
+import { roomFormRedirect } from './roomFormRedirect'
 
 const routes = [
   { path: "/inbox", name: "inbox", component: () => import("./pages/Inbox.vue") },
@@ -14,10 +15,6 @@ const routes = [
     path: '/',
     name: 'landing',
     component: () => import('./pages/Landing.vue'),
-    // The room form left the landing page for /new; old links to it still land on the form.
-    beforeEnter: (to: RouteLocationNormalized) => to.query.new === 'blank' || to.hash === '#start'
-      ? { path: '/new', query: to.query.new === 'blank' ? { new: 'blank' } : {} }
-      : true,
   },
   {
     path: '/new',
@@ -58,3 +55,6 @@ export const router = createRouter({
     return { top: 0 }
   },
 })
+
+// Runs on every navigation, so a hash or query change on / is redirected too.
+router.beforeEach(to => roomFormRedirect(to))

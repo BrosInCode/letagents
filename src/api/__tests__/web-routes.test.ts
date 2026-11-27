@@ -50,7 +50,7 @@ test("registerWebRoutes preserves route registration order", (t) => {
     { method: "use", path: "<static>" },
     { method: "get", path: "/" },
     { method: "get", path: "/docs" },
-    { method: "get", path: ["/inbox", "/messages", "/my-work", "/connectors"] },
+    { method: "get", path: ["/inbox", "/messages", "/my-work", "/connectors", "/new"] },
     { method: "get", path: /^\/ask\/[A-Za-z0-9_-]{20,64}$/ },
     { method: "get", path: /^\/company\/[1-9][0-9]{0,19}$/ },
     { method: "get", path: "/app" },
