@@ -7,6 +7,7 @@
       <button type="button" aria-label="Hide sidebar" title="Hide sidebar" @click="emit('close')"><svg  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3h18v18H3V3ZM9 3v18m8-13-4 4 4 4" /></svg></button>
     </div>
     <nav class="web-sidebar-nav" aria-label="Workspace">
+      <RouterLink to="/new"><svg  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>New room</RouterLink>
       <RouterLink to="/my-work"><svg  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 6 2 2 4-4M12 6h9M3 15l2 2 4-4m3 2h9M12 21h9" /></svg>My work</RouterLink>
       <RouterLink to="/messages"><svg  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3h18v13H8l-5 5V3Z" /></svg>Messages</RouterLink>
     </nav>

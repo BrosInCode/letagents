@@ -18,7 +18,8 @@ import ToastContainer from '@/components/ui/ToastContainer.vue'
 import './styles/landing.css'
 
 const route = useRoute()
-const isLanding = computed(() => route.name === 'landing')
+// The landing page and the room form (/new) share the dark ink look.
+const isLanding = computed(() => route.name === 'landing' || route.name === 'new-room')
 // Show navbar/footer on landing and docs, hide in room view.
 // The landing page is one full screen, so it has the navigation bar but no footer.
 const showNavbar = computed(() => !['room', 'messages', 'my-work', 'connectors', 'ask', 'inbox'].includes(String(route.name)))
