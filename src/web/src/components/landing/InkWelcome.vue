@@ -1,6 +1,6 @@
 <template>
   <section ref="root" class="welcome" :data-skipped="skipped" :data-fallback="fallback" :style="markStyle"
-    aria-labelledby="welcome-title" @pointerdown="onPress" @keydown="onPress" @pointermove="ink.stir">
+    aria-labelledby="welcome-title" @pointerdown="onPress" @keydown="onPress" @focusin="ink.skip()" @pointermove="ink.stir">
     <canvas v-if="!fallback" ref="sceneCanvas" class="welcome-scene" :data-veiled="veiled" aria-hidden="true" />
     <div v-else class="welcome-mark" aria-hidden="true">
       <svg viewBox="-12 -12 152 152">
@@ -52,7 +52,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import DesktopPlatformIcon from './DesktopPlatformIcon.vue'
 import { useInkScene, type InkMarkPlacement } from '../../../../../shared/ui/ink/useInkScene'
 import {
@@ -100,7 +100,13 @@ function placeMark(): InkMarkPlacement {
 const ink = useInkScene({ canvas: sceneCanvas, placeMark })
 const { fallback, veiled, skipped } = ink
 
+// The static mark has no scene to make again, so it follows the layout here.
+function onFallbackResize() {
+  if (fallback.value) placeMark()
+}
+
 // A first look should never hold anyone up: a press anywhere but a link finishes the scene.
+// Keyboard focus on a download (still faded out early in the opening) finishes it too.
 function onPress(event: Event) {
   if ((event.target as HTMLElement).closest('button, a')) return
   ink.skip()
@@ -132,7 +138,10 @@ onMounted(() => {
     .then((release) => { macDesktopBeta.value = release })
     .catch(() => { /* Keep the bundled fallback. */ })
   makeGrain()
+  window.addEventListener('resize', onFallbackResize)
 })
+
+onUnmounted(() => window.removeEventListener('resize', onFallbackResize))
 </script>
 
 <style scoped>

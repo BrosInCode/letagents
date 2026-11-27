@@ -24,10 +24,32 @@
   --l-track: rgba(255, 255, 255, 0.1);
   --l-lit-primary: rgba(245, 245, 247, 0.58);
   --l-hairline: rgba(255, 255, 255, 0.08);
+  /* The site's own tokens, held dark here: a saved light theme must not put dark text on the ink. */
+  color-scheme: dark;
+  --bg: #0a0a0a;
+  --bg-subtle: #111111;
+  --bg-card: #141414;
+  --bg-elevated: #1a1a1a;
+  --text: #fafafa;
+  --text-secondary: #a1a1aa;
+  --text-tertiary: #71717a;
+  --text-muted: #52525b;
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+  --border-accent: rgba(255, 255, 255, 0.18);
+  --accent-dim: rgba(255, 255, 255, 0.04);
+  --accent-hover: rgba(255, 255, 255, 0.08);
+  --accent-active: rgba(255, 255, 255, 0.12);
   position: relative;
   isolation: isolate;
   background: #0a0a0a;
   color: var(--l-text);
+}
+
+/* An overscroll past the landing page shows the ink's colour, not a light page. */
+html:has(#letagents-app.landing-theme),
+html:has(#letagents-app.landing-theme) body {
+  background: #0a0a0a;
 }
 
 /* The landing header is not a bar: the brand on the left, quiet text links on the right,

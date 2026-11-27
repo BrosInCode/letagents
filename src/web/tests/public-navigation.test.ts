@@ -116,6 +116,31 @@ test('docs sidebar exposes dialog and current-location semantics only where appr
   assert.doesNotMatch(desktop, /aria-modal|Close navigation/)
 })
 
+test('the docs check the session first, so a signed-in reader keeps the account controls', async t => {
+  const originalFetch = globalThis.fetch
+  const requests: string[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    requests.push(String(input))
+    return new Response(JSON.stringify({ authenticated: true, account: { login: 'reader' } }), { status: 200 })
+  }) as typeof fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { path: '/docs', name: 'docs', component: { render: () => h('p', 'Documentation') } },
+  ] })
+  const render = async () => {
+    const app = createSSRApp({ render: () => h(AppShell) })
+    app.use(router)
+    return renderToString(app)
+  }
+  await router.push('/docs')
+  const before = await render()
+  assert.deepEqual(requests, ['/auth/session'])
+  assert.doesNotMatch(before, /nav-divider/)
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.match(await render(), /nav-divider/)
+  assert.equal(requests.length, 1)
+})
+
 test('Venom styling is confined to the landing route, which has no theme toggle or footer', async () => {
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/', name: 'landing', component: { render: () => h('p', 'Landing') } },
