@@ -54,11 +54,11 @@
     :data-sidebar-mode="isSettingsSurface ? 'hidden' : sidebarMode"
     :data-picker-arrival="firstRunFinished && usedRoomFlight || null"
     :data-sidebar-resizing="isSidebarResizing"
-    :style="[desktopShellStyle, roomTheme.css.value, { '--app-grain': appGrain }]"
+    :style="[desktopShellStyle, roomTheme.css.value]"
     :data-room-theme="roomTheme.effective.value"
     :inert="roomArrival === 'waiting'"
     data-testid="desktop-shell"
-    :data-app-texture="appAppearance.texture.value === 'textured' ? 'grain' : 'plain'"
+    data-app-texture
   >
     <Transition name="desktop-sidebar">
       <div
@@ -746,7 +746,7 @@ const roomCompany = computed<RoomCompanyAppearance | null>(() => {
 const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
 // Demo: the onboarding film grain as the app background.
 const appGrain = useFilmGrainBehind();
-const appAppearance = useAppAppearance();
+useAppAppearance(appGrain);
 // An older API does not return a revision or expose the company theme write route.
 const canSetCompanyTheme = computed(() => company.organizations.value.some(org =>
   org.github_org_id === roomCompany.value?.id && org.setup && org.role === "owner"

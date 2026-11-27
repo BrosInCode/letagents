@@ -1,9 +1,13 @@
 /*
- * The app background: pure black in dark mode, white in light mode. With
- * "Textured" (Settings → Styling), the onboarding film grain and a soft
- * vignette are the shell's own background, under all content: nothing is
- * laid over text. The large panels are see-through so the shell background
- * shows; cards, bubbles, the composer and menus keep their colour.
+ * The app background: pure black in dark mode, white in light mode. The
+ * large panels are see-through so the shell background shows; cards,
+ * bubbles, the composer and menus keep their colour.
+ *
+ * Texture: each part of the app listed in TEXTURE_SURFACES
+ * (useAppAppearance.ts) has its own switch in Settings → Styling. Its id is
+ * a word in `data-texture` on <html>, and one rule below adds the grain tile
+ * (`--app-grain`, also on <html>) to that part. The grain is always a
+ * background image, so it paints under the text, never over it.
  */
 .desktop-shell[data-app-texture] {
   --bg: light-dark(#fff, #000);
@@ -15,7 +19,7 @@
   background: light-dark(#fff, #000);
 }
 
-.desktop-shell[data-app-texture="grain"] {
+:root[data-texture~="background"] .desktop-shell[data-app-texture] {
   background:
     radial-gradient(120% 90% at 55% 42%, transparent 60%, light-dark(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.5))),
     var(--app-grain, none),
@@ -49,11 +53,46 @@ html:has(.desktop-shell[data-app-texture]) body {
 }
 
 /*
- * Chat bubbles carry the same grain over their own colour. A background
- * image always paints under the text, so the words stay clean. Same cached
- * tile as the shell: no extra work per bubble. The long selector outranks
- * the role rules, whose `background` shorthand would clear the image.
+ * The other parts carry the grain over their own colour. Each selector is
+ * stronger than the part's own rules, whose `background` shorthand would
+ * otherwise clear the image. Same cached tile everywhere: no extra work.
  */
-.desktop-shell[data-app-texture="grain"] .room-chat-message > .room-chat-message-content > .room-message-line > .room-message-bubble {
-  background-image: var(--app-grain, none);
+:root[data-texture~="bubbles"] .room-chat-message > .room-chat-message-content > .room-message-line > .room-message-bubble {
+  background-image: var(--app-grain);
+}
+
+/* The welcome bubble is a gradient: keep it under the grain. */
+:root[data-texture~="bubbles"] .room-first-message-bubble {
+  background-image:
+    var(--app-grain),
+    linear-gradient(125deg, var(--chat-bubble-start), var(--chat-bubble) 48%, var(--chat-bubble-end));
+}
+
+:root[data-texture~="composer"] :is(.desktop-composer, .room-thread-composer) {
+  background-image: var(--app-grain);
+}
+
+:root[data-texture~="cards"] :is(
+  .desktop-task-card,
+  .desktop-task-empty,
+  .action-card,
+  .room-empty-card,
+  .settings-profile-card,
+  .rent-provider-card,
+  .managed-agent-change-card
+) {
+  background-image: var(--app-grain);
+}
+
+:root[data-texture~="menus"] :is(
+  .desktop-context-menu,
+  .room-message-context-menu,
+  .agent-inspector-overflow-menu,
+  .desktop-composer-gif-panel,
+  .desktop-new-room-modal,
+  .room-settings-modal,
+  .desktop-rules-dialog,
+  .desktop-action-toast
+) {
+  background-image: var(--app-grain);
 }
