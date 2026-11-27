@@ -189,6 +189,17 @@ html[data-window-chrome="mac"] .sidebar-topbar {
 html[data-window-chrome="mac"] .sidebar-wordmark { display: none; }
 html[data-window-chrome="mac"] .sidebar-topbar-actions { margin-left: auto; }
 html[data-window-chrome="mac"] .sidebar-topbar button { -webkit-app-region: no-drag; }
+/* The room header is the title bar of the content side: drag the window by
+   its empty space, and double-click it to zoom, as in any Mac app. */
+html[data-window-chrome="mac"] .desktop-room-header { -webkit-app-region: drag; }
+html[data-window-chrome="mac"] .desktop-room-header :is(button, a, input, select, textarea, [role="button"], [tabindex]) {
+  -webkit-app-region: no-drag;
+}
+/* A drag area takes every click on it, even under a menu or dialog that sits
+   on top, unless that layer says no-drag. Keep such layers clickable. */
+html[data-window-chrome="mac"] :is([role="menu"], [role="dialog"], [role="listbox"], [aria-modal="true"], dialog) {
+  -webkit-app-region: no-drag;
+}
 html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"] .app-main { padding-top: 36px; }
 html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"]::before {
   content: ""; position: absolute; inset: 0 0 auto; height: 36px; z-index: 80;
