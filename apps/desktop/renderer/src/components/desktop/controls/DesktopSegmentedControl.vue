@@ -1,10 +1,14 @@
 <template>
   <div
+    ref="root"
     class="desktop-segmented-control"
     :data-size="size"
+    :data-sliding="sliding && indicator.placed.value ? (indicator.moving.value ? 'moving' : 'placed') : undefined"
     :role="mode === 'tabs' ? 'tablist' : 'group'"
     :aria-label="label"
+    :style="sliding ? indicator.style.value : undefined"
   >
+    <span v-if="sliding && indicator.placed.value" class="desktop-segmented-indicator" aria-hidden="true" />
     <button
       v-for="option in options"
       :key="option.id"
@@ -27,6 +31,9 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from "vue";
+import { useSlidingIndicator } from "../../../composables/useSlidingIndicator";
+
 export interface DesktopSegmentedOption {
   id: string;
   label: string;
@@ -42,6 +49,8 @@ const props = withDefaults(
     mode?: "filters" | "tabs";
     size?: "compact" | "large";
     tabPanelIdPrefix?: string;
+    /** One highlight that slides to the chosen option, instead of each option lighting up in place. */
+    sliding?: boolean;
   }>(),
   {
     mode: "filters",
@@ -52,6 +61,9 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [value: string];
 }>();
+
+const root = ref<HTMLElement | null>(null);
+const indicator = useSlidingIndicator(root, 'button[data-active="true"]', () => [props.modelValue, props.options.length]);
 
 function tabId(optionId: string): string | undefined {
   if (props.mode !== "tabs" || !props.tabPanelIdPrefix) return undefined;
@@ -93,6 +105,7 @@ function handleKeydown(event: KeyboardEvent): void {
 
 <style scoped>
 .desktop-segmented-control {
+  position: relative;
   display: flex;
   flex-wrap: nowrap;
   gap: var(--desktop-segmented-gap, 4px);
@@ -198,6 +211,48 @@ function handleKeydown(event: KeyboardEvent): void {
     border-color: var(--border-strong);
     background: var(--accent-hover);
     color: var(--text);
+  }
+}
+
+/*
+ * Sliding mode: one highlight moves to the chosen option. Strong ease-out so
+ * it answers at once and settles softly; transform and width only.
+ */
+.desktop-segmented-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--indicator-width);
+  height: var(--indicator-height);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--desktop-segmented-button-radius, 10px);
+  background: var(--accent-active);
+  box-shadow: 0 1px 2px light-dark(rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.4));
+  transform: translate(var(--indicator-x), var(--indicator-y));
+  pointer-events: none;
+}
+
+.desktop-segmented-control[data-sliding="moving"] .desktop-segmented-indicator {
+  transition:
+    transform 260ms cubic-bezier(0.23, 1, 0.32, 1),
+    width 260ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.desktop-segmented-control[data-sliding] button {
+  position: relative;
+  z-index: 1;
+}
+
+/* The highlight is the selection now; the chosen option keeps only its text colour. */
+.desktop-segmented-control[data-sliding] button[data-active="true"] {
+  border-color: transparent;
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-segmented-control[data-sliding] button[data-active="true"]:hover {
+    border-color: transparent;
+    background: transparent;
   }
 }
 

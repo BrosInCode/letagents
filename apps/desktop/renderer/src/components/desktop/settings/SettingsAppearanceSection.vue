@@ -9,6 +9,7 @@
       </div>
       <DesktopSegmentedControl
         label="Light or dark mode"
+        sliding
         :model-value="colorMode"
         :options="modeOptions"
         @update:model-value="setColorMode($event as AppColorMode)"
@@ -21,6 +22,7 @@
       </div>
       <DesktopSegmentedControl
         label="Background texture"
+        sliding
         :model-value="texture"
         :options="textureOptions"
         @update:model-value="setTexture($event as AppBackgroundTexture)"
