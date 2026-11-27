@@ -40,7 +40,7 @@
             <div ref="turnStage" class="agent-refresh-stage">
             <section class="agent-refresh-panel agent-refresh-identity" :inert="step !== 'identity'" :aria-hidden="step !== 'identity'">
               <h4>Make it yours.</h4>
-              <AgentIdentityPicker v-model="identityAvatar" v-model:name="configuredName" :active="open && (step === 'identity' || turning)" :animate="!motionPaused" :error="identityError" />
+              <AgentIdentityPicker v-model="identityAvatar" v-model:name="configuredName" :active="open && (step === 'identity' || turning)" :animate="!motionPaused" :error="identityError" :taken-names="takenNames" />
               <div v-if="hasSupervisedRuntime(selectedProvider)" class="agent-refresh-first-message"><AddAgentFirstMessage v-model="supervisedCharter" /></div>
             </section>
             <section class="agent-refresh-panel agent-refresh-brain" :inert="step !== 'brain'" :aria-hidden="step !== 'brain'">
@@ -173,7 +173,7 @@
                 @open-install-guide="openProviderInstallGuide"
                 @refresh="retryProviderSetup"
                 @create-worktree="createWorktree"
-                @start="startManagedAgent"
+                @start="startWithFreeName"
                 @recover-launch="handleRecoverSupervisedLaunch"
               />
 
@@ -218,7 +218,14 @@ const props = defineProps<AddAgentModalProps>();
 const emit = defineEmits<AddAgentModalEvents>();
 const { configuredName, configuredAvatar, roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, customModelError, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, providerSignIn, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
 
-const { dialogElement, openModelSettings, handleAfterLeave, handleDialogTab, handleRecoverSupervisedLaunch, step, identityError, identityAvatar, motionPaused, turnBody, turnStage, turning, showStep } = useAgentSetupPresentation(props, configuredName, configuredAvatar, supervisedUi);
+const { dialogElement, openModelSettings, handleAfterLeave, handleDialogTab, handleRecoverSupervisedLaunch, step, identityError, takenNames, identityAvatar, motionPaused, turnBody, turnStage, turning, showStep } = useAgentSetupPresentation(props, configuredName, configuredAvatar, supervisedUi);
 
+// The room's names can arrive while Brain is open. A name that became taken
+// goes back to Identity, where its warning shows, instead of starting.
+function startWithFreeName(): void {
+  // A launch in progress or restored owns its name, and Identity is closed to it.
+  if (identityError.value && !supervisedUi.launch.view.value) { showStep('identity'); return; }
+  void startManagedAgent();
+}
 </script>
 <style scoped src="./add-agent/AddAgentRefresh.css"></style>

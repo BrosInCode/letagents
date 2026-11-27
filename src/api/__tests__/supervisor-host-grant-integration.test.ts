@@ -983,6 +983,76 @@ test("a supervised worker never takes a name an offline durable worker or anothe
   }
 });
 
+test("a new supervised worker never takes a name a visible person in the room answers to", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  await authDb!.upsertRoomParticipant({ room_id: room.id, participant_key: "human:emmymay", kind: "human",
+    github_login: "EmmyMay", display_name: "Emmy May" });
+  await authDb!.upsertRoomParticipant({ room_id: room.id, participant_key: "human:gone", kind: "human",
+    github_login: "GoneUser", display_name: "GoneUser" });
+  await authDb!.setRoomParticipantsHidden({ room_id: room.id, participant_keys: ["human:gone"], hidden: true, hidden_by: "owner" });
+
+  // The login and the display name both answer to "@", in any spelling.
+  for (const requested of ["EmmyMay", "emmymay", "EmmyMay ", "Emmy May"]) {
+    const minted = recorder();
+    await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key,
+      agent_instance_id: `daemon:${requested.trim().replace(/\s+/g, "-")}`, display_name: requested, ide_label: "Codex" } }, minted);
+    assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+    assert.equal(minted.body.display_name_reassigned, true, `${requested} is a person's name`);
+    assert.match(minted.body.display_name, /^[A-Za-z]+$/);
+    assert.notEqual(minted.body.display_name.toLowerCase().replace(/\s+/g, ""), "emmymay");
+    // The next spelling is asked for by a fresh worker of the same agent.
+    await authDb!.endRoomAgentSession({ session_id: minted.body.session_id, room_id: room.id });
+  }
+
+  // A person hidden from the room does not hold a name.
+  const free = recorder();
+  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key,
+    agent_instance_id: "daemon:gone", display_name: "GoneUser", ide_label: "Codex" } }, free);
+  assert.equal(free.statusCode, 201, JSON.stringify(free.body));
+  assert.equal(free.body.display_name, "GoneUser");
+});
+
+test("a supervised agent that was in the room before keeps a name a person also answers to", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  // The agent took the name before the person joined, so people already
+  // address it by that name. This rule must not rename it.
+  await authDb!.upsertRoomParticipant({ room_id: room.id, participant_key: `agent:${agent.canonical_key}`, kind: "agent",
+    agent_key: agent.canonical_key, display_name: "Sage", actor_label: "Sage | Owner's agent | Codex" });
+  await authDb!.upsertRoomParticipant({ room_id: room.id, participant_key: "human:sage", kind: "human",
+    github_login: "sage", display_name: "sage" });
+  const minted = recorder();
+  await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key,
+    agent_instance_id: "daemon:sage", display_name: "Sage", ide_label: "Codex" } }, minted);
+  assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+  assert.equal(minted.body.display_name, "Sage");
+  assert.equal(minted.body.display_name_reassigned, false);
+});
+
+test("an agent that was steered off a person's name does not take it on a later start", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  await authDb!.upsertRoomParticipant({ room_id: room.id, participant_key: "human:sage", kind: "human",
+    github_login: "sage", display_name: "sage" });
+  const body = { generation: 1, room_id: room.id, agent_key: agent.canonical_key,
+    agent_instance_id: "daemon:steered", display_name: "Sage", ide_label: "Codex" };
+  const first = recorder();
+  await mint({ ...reqBase, body }, first);
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  assert.equal(first.body.display_name_reassigned, true);
+  // The agent is now in the room under its assigned name, and the supervisor
+  // lost that name: it was stopped and asks for "Sage" again.
+  await authDb!.upsertRoomParticipant({ room_id: room.id, participant_key: `agent:${agent.canonical_key}`, kind: "agent",
+    agent_key: agent.canonical_key, display_name: first.body.display_name, actor_label: first.body.actor_label });
+  await authDb!.endRoomAgentSession({ session_id: first.body.session_id, room_id: room.id });
+  const again = recorder();
+  await mint({ ...reqBase, body }, again);
+  assert.equal(again.statusCode, 201, JSON.stringify(again.body));
+  assert.equal(again.body.display_name_reassigned, true);
+  assert.notEqual(again.body.display_name.toLowerCase(), "sage");
+});
+
 test("live workers that already share a name converge by renaming only the newer one", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);

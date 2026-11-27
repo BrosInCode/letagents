@@ -5,6 +5,7 @@ import { db } from "./client.js";
 import { messages, room_participants } from "./schema.js";
 import { clampLimit } from "./utils.js";
 import { toRoomParticipant } from "./mappers.js";
+import { agentDisplayNameKey } from "../../../shared/agent-names.mjs";
 import type { RoomParticipant, RoomParticipantRow } from "./types.js";
 
 export async function upsertRoomParticipant(input: {
@@ -141,6 +142,41 @@ export async function getRoomParticipants(
 
   const avatars = await getAgentAvatars(rows.map(row => row.agent_key));
   return (rows as RoomParticipantRow[]).map(row => ({ ...toRoomParticipant(row), ...(row.agent_key && avatars.has(row.agent_key) ? { avatar: avatars.get(row.agent_key) } : {}) }));
+}
+
+/**
+ * The names people in a room answer to, which an agent must not take:
+ * "@name" would otherwise reach the agent or the person depending on who
+ * routed it. Each visible person's display name and GitHub login.
+ *
+ * Empty when the agent asks for the name it already has in this room, so
+ * an agent that people already address by a name is never renamed. Any
+ * other name it asks for, including one it was steered away from before,
+ * is checked against people again.
+ * Narrow on purpose: the supervisor worker mint reads it.
+ */
+export async function getRoomPeopleNamesHeldFromAgent(roomId: string, agentKey: string, requestedName: string): Promise<string[]> {
+  const requestedKey = agentDisplayNameKey(requestedName);
+  if (!requestedKey) return [];
+  const history = await db
+    .select({ display_name: room_participants.display_name })
+    .from(room_participants)
+    .where(and(
+      eq(room_participants.room_id, roomId),
+      eq(room_participants.kind, "agent"),
+      eq(room_participants.agent_key, agentKey),
+    ));
+  if (history.some((row) => agentDisplayNameKey(row.display_name) === requestedKey)) return [];
+  const rows = await db
+    .select({ display_name: room_participants.display_name, github_login: room_participants.github_login })
+    .from(room_participants)
+    .where(and(
+      eq(room_participants.room_id, roomId),
+      eq(room_participants.kind, "human"),
+      isNull(room_participants.hidden_at),
+    ));
+  return [...new Set(rows.flatMap((row) => [row.display_name, row.github_login]
+    .filter((name): name is string => typeof name === "string" && name.trim().length > 0)))];
 }
 
 export async function getRoomParticipantsForRooms(

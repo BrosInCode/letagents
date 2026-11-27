@@ -11,6 +11,7 @@ import {
   isWorkerDisplayNameExhaustedError,
   getGitRoomBindingForRoom,
   getProjectById,
+  getRoomPeopleNamesHeldFromAgent,
   getSupervisorGrantOwnerAccount,
   getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
@@ -524,6 +525,10 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       // name is reassigned rather than refused: a worker must never fail to
       // start because of what it is called.
       const lostNames: string[] = [];
+      // People's names are held unless the agent asks for the name it
+      // already has here. Read before the mint's transaction, which must
+      // stay short.
+      const peopleNames = await getRoomPeopleNamesHeldFromAgent(roomId, agent.canonical_key, requestedDisplayName);
       for (let attempt = 0; ; attempt += 1) {
         let resolved: { display_name: string; reassigned: boolean } | null = null;
         try {
@@ -548,7 +553,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
                 agent_key: agent.canonical_key,
                 agent_instance_id: agentInstanceId,
                 holders,
-                additionally_held: lostNames,
+                additionally_held: [...lostNames, ...peopleNames],
               });
               return resolved && {
                 display_name: resolved.display_name,

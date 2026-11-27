@@ -13,6 +13,7 @@ import { attentionResponseAgentNames } from "../../domain/attention-response";
 import { waitingAgentIndicators } from "../../domain/scheduled-retry";
 import { roomMentionCandidates } from "../../domain/participants";
 import { supervisorEntriesResourceFreshness } from "../../domain/supervisor-entries-resource";
+import { roomHeldNames } from "../../domain/room-held-names";
 import type { RoomShellContextOf } from "./context";
 
 /** Environment and repo state, participants, mentions, and agent work indicators. */
@@ -96,6 +97,8 @@ export function useRoomShellParticipants(context: unknown) {
   return {
     githubEventsAvailable,
     managedAgentRepoStatus, managedAgentRepoRootPath, roomAttentionResponseNames, roomParticipants,
+    // Names a new agent should not take here: the Add agent dialog warns on them.
+    addAgentHeldNames: computed(() => roomHeldNames({ roomIdentifier: props.room.identifier, participants: props.participants, presence: props.presence, entries: supervisorEntries.value })),
     agentMentionInsertTextByEntryId, pendingResponseParticipants, workWindowNow, localAgentWork,
   };
 }
