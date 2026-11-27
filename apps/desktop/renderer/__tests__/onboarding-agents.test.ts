@@ -9,6 +9,7 @@ import type {
 } from "../../electron/ipc-types";
 import {
   onboardingStateFromPreflight,
+  onboardingUnavailableText,
   useOnboardingAgents,
 } from "../src/components/desktop/onboarding/useOnboardingAgents";
 
@@ -235,4 +236,34 @@ test("does nothing while inactive; leaving the step ends a sign-in; dispose unsu
 
   scope.stop();
   assert.equal(bridge.subscribed(), false);
+});
+
+test("three fast sign-in clicks leave one sign-in, and no row stuck on Signing in", async () => {
+  const bridge = installBridge({ results: {
+    "claude-code": preflight("claude-code", "auth_required"),
+    codex: preflight("codex", "auth_required"),
+    cursor: preflight("cursor", "auth_required"),
+  } });
+  const { agents, scope } = mount();
+  await settle();
+  await agents.signIn("claude-code");
+  // B waits for A's cancel; C is clicked in that gap.
+  const b = agents.signIn("codex");
+  const c = agents.signIn("cursor");
+  await Promise.all([b, c]);
+  await settle();
+  const states = Object.fromEntries(agents.providers.value.map((p) => [p.id, p.state]));
+  assert.equal(states.cursor, "signing-in", "the last click owns the sign-in");
+  assert.equal(states.codex, "signin");
+  assert.equal(states["claude-code"], "signin");
+  assert.equal(agents.providers.value.filter((p) => p.state === "signing-in").length, 1);
+  assert.ok(!bridge.calls.includes("start codex"), "the overtaken click starts nothing");
+  scope.stop();
+});
+
+test("an unavailable agent's note never names the agent twice", () => {
+  assert.equal(onboardingUnavailableText("Claude Code", "Update it to 2.1."), "Claude Code can't start yet: Update it to 2.1.");
+  assert.equal(onboardingUnavailableText("Claude Code", "Couldn't check Claude Code: timed out"), "Couldn't check Claude Code: timed out");
+  assert.equal(onboardingUnavailableText("Cursor", "Cursor needs an update."), "Cursor needs an update.");
+  assert.equal(onboardingUnavailableText("Cursor", ""), "Cursor can't start yet.");
 });

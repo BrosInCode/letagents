@@ -115,7 +115,7 @@ import codexIcon from "../../../assets/harness-icons/codex.png";
 import cursorIcon from "../../../assets/harness-icons/cursor.png";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
 import type { FirstRoomState, FirstRoomTask } from "./useOnboardingFirstRoom";
-import type { OnboardingProvider } from "./useOnboardingAgents";
+import { onboardingUnavailableText, type OnboardingProvider } from "./useOnboardingAgents";
 import { useFilmGrain } from "./useFilmGrain";
 import "./onboarding-step.css";
 
@@ -178,7 +178,7 @@ const unavailableNote = computed(() => {
   const provider = props.providers.find(item => item.id === noteFor.value);
   if (!provider) return null;
   if (provider.state === "checking") return `Checking ${provider.name} again…`;
-  return provider.state === "unavailable" ? `${provider.name} can’t start yet: ${provider.detail}` : null;
+  return provider.state === "unavailable" ? onboardingUnavailableText(provider.name, provider.detail) : null;
 });
 const hintOf = (provider: OnboardingProvider) => ({
   ready: undefined, checking: "Checking this agent.", signin: "Needs sign-in. Click to sign in.",
@@ -195,7 +195,8 @@ const tasks = computed(() => [
 function taskState(index: number): "done" | "active" | "failed" | "waiting" {
   if (props.setupState === "done") return "done";
   const at = tasks.value.findIndex(item => item.id === props.setupTask);
-  if (at < 0) return "waiting";
+  // Failed with no task: every task finished, but the room could not be opened.
+  if (at < 0) return props.setupState === "failed" ? "done" : "waiting";
   if (index < at) return "done";
   if (index > at) return "waiting";
   return props.setupState === "failed" ? "failed" : "active";

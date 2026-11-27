@@ -75,6 +75,17 @@ export function onboardingStateFromPreflight(
   return { state: "unavailable", detail: reason };
 }
 
+/**
+ * "<name> can't start yet: <reason>", unless the reason already says which agent failed
+ * (a failed check reads "Couldn't check <name>: …"); then the reason alone.
+ */
+export function onboardingUnavailableText(name: string, detail: string): string {
+  const reason = detail.trim();
+  if (!reason) return `${name} can't start yet.`;
+  if (/^(couldn['’]t|could not|can['’]t|cannot)\b/i.test(reason) || reason.toLowerCase().includes(name.toLowerCase())) return reason;
+  return `${name} can't start yet: ${reason}`;
+}
+
 /** A tiny FIFO limiter: a finished check hands its slot straight to the next one. */
 function createLimiter(limit: number) {
   let running = 0;
@@ -113,6 +124,8 @@ export function useOnboardingAgents(options: OnboardingAgentsOptions) {
   const epochs = new Map<DesktopAgentProviderId, number>();
   const withSlot = createLimiter(ONBOARDING_PREFLIGHT_CONCURRENCY);
   let signingId: DesktopAgentProviderId | null = null;
+  /** Bumped by each sign-in click: a click that waited for an earlier cancel gives way to a later click. */
+  let signInToken = 0;
   let refreshing: Promise<void> | null = null;
   let refreshToken = 0;
   let disposed = false;
@@ -273,9 +286,17 @@ export function useOnboardingAgents(options: OnboardingAgentsOptions) {
     if (!live() || signingId === id) return;
     const provider = find(id);
     if (!provider || provider.state !== "signin") return;
+    const token = ++signInToken;
     // One sign-in at a time: starting another ends the first.
     if (signingId) await cancelSignIn(signingId);
+    if (token !== signInToken || !live()) return;
     signingId = id;
+    // Any other row still on "Signing in…" lost its sign-in to a later click: give it back its button.
+    for (const other of providers.value) {
+      if (other.id === id || other.state !== "signing-in" || inFlight.has(other.id)) continue;
+      patch(other.id, { state: "signin", detail: "Needs sign-in", signIn: undefined });
+      void desktopIpc.workers.cancelProviderSignIn(other.id).catch(() => undefined);
+    }
     epochs.set(id, (epochs.get(id) ?? 0) + 1);
     signInError.value = null;
     patch(id, {
