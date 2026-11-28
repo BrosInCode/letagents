@@ -719,3 +719,60 @@ test("after sign-in a cloud room shows no local count before the server answers"
     assert.deepEqual(seen.filter((count) => count > 0), [], "the badge never showed a local count");
   } finally { scope.stop(); globalThis.window = originalWindow; }
 });
+
+test("start-up under a steady message stream: a slow server answer is applied, not dropped", async () => {
+  const originalWindow = globalThis.window;
+  let gets = 0;
+  const latest = 6;
+  globalThis.window = { letagentsDesktop: { room: {
+    getMessagesAfter: async (_id: string, after: string | null) => ({
+      messages: [5, 6].filter((n) => n > Number(after!.slice(4))).map(message), hasMore: false }),
+    getAccountUnread: async () => {
+      gets += 1;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return { rooms: [{ roomId: "room-x", readMessageId: "msg_4", unreadCount: latest - 4, githubUnreadCount: 0 }] };
+    },
+    reportRoomRead: async () => {},
+  }, notifications: { setBadgeCount: async () => {} } } } as never;
+  const scope = effectScope();
+  const rooms = ref([room("room-x", latest), room("room-busy", 100)]);
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms, readMarkers: ref({ "room-x": "msg_4" }), storageMode: ref("cloud"),
+  }))!;
+  let busy = 100;
+  const timer = setInterval(() => { busy += 1; rooms.value = [room("room-x", latest), room("room-busy", busy)]; }, 150);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 3_200));
+    assert.equal(counts.roomCounts.value["room-x"], 2, "the first answer shows its count while another room keeps moving");
+  } finally { clearInterval(timer); scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("the server count stays on screen while the local recount loads after the server gives no count", async () => {
+  const originalWindow = globalThis.window;
+  let allowed = true;
+  globalThis.window = { letagentsDesktop: { room: {
+    getMessagesAfter: async (_id: string, after: string | null) => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return { messages: [11, 12].filter((n) => n > Number(after!.slice(4))).map(message), hasMore: false };
+    },
+    getAccountUnread: async () => ({ rooms: [allowed
+      ? { roomId: "room-g", readMessageId: "msg_10", unreadCount: 2, githubUnreadCount: 0 }
+      : { roomId: "room-g", readMessageId: null, unreadCount: null, githubUnreadCount: null }] }),
+    reportRoomRead: async () => {},
+  }, notifications: { setBadgeCount: async () => {} } } } as never;
+  const scope = effectScope();
+  const readRevision = ref(0);
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms: ref([room("room-g", 12)]), readMarkers: ref({ "room-g": "msg_4" }), storageMode: ref("cloud"),
+    readRevision: () => readRevision.value, takeReads: () => [null],
+  }))!;
+  const seen: number[] = [];
+  try {
+    await settleDebounce();
+    assert.equal(counts.roomCounts.value["room-g"], 2);
+    scope.run(() => watchTotals(counts.totalCount, seen));
+    allowed = false; readRevision.value += 1; await nextTick(); await settleDebounce();
+    assert.equal(counts.roomCounts.value["room-g"], 2);
+    assert.ok(!seen.includes(0), `the badge never read 0 during the switch (saw ${seen.join(", ")})`);
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});

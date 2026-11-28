@@ -84,6 +84,8 @@ export function useDesktopUnreadCounts(options: {
    * (its access check cannot say yes right now), by room key. Such a room is
    * counted here from the later of this point and this device's confirmed read.
    */
+  /** The server's last counts for those rooms, shown until the local count from the read point has loaded. */
+  const staleCounts = ref<Record<string, { count: number; github: number }>>({});
   const staleReads = ref<Record<string, string>>({});
   /** The newest read other devices or the web reported, by room key (from `room_read` frames). */
   const elsewhereReads = ref<Record<string, number>>({});
@@ -95,6 +97,16 @@ export function useDesktopUnreadCounts(options: {
   /** Set by the debounce timer: only then does a refresh talk to the server. */
   let serverDue = false;
   let revision = 0;
+  /** Moves only when the account or the storage settings change: an answer from before that is dropped, any other answer is applied. */
+  let generation = 0;
+  /** A slow or silent server hides cloud badges at most this long. */
+  const GATE_FALLBACK_MS = 5_000;
+  let gateTimer: ReturnType<typeof setTimeout> | null = null;
+  function armGate(): void {
+    if (gateTimer) clearTimeout(gateTimer);
+    gateTimer = setTimeout(() => { gateTimer = null; serverSettled.value = true; }, GATE_FALLBACK_MS);
+  }
+  armGate();
   let disposed = false;
   let running: Promise<void> | null = null;
   let refreshPending = false;
@@ -165,8 +177,11 @@ export function useDesktopUnreadCounts(options: {
         continue;
       }
       const snapshot = snapshots.value[key];
-      counts[key] = marker && marker !== room.latestMessageId && snapshot?.readMessageId === marker
-        ? snapshot.count : 0;
+      const last = staleCounts.value[key];
+      counts[key] = marker && marker !== room.latestMessageId && snapshot?.readMessageId === marker ? snapshot.count
+        : marker && marker !== room.latestMessageId && last
+          ? last.count + (readGitHubEventsVisible(room.roomIdentifier) ? last.github : 0)
+          : 0;
     }
     return counts;
   });
@@ -221,7 +236,7 @@ export function useDesktopUnreadCounts(options: {
   }
 
   /** Reads the server's counts when they may have changed, then reports the reads this device proved. */
-  async function syncServer(isCurrent: () => boolean): Promise<void> {
+  async function syncServer(isCurrent: () => boolean, sameGeneration: () => boolean): Promise<void> {
     const accountId = options.account.value?.id;
     if (!accountId) return;
     const read = desktopIpc.room?.getAccountUnread;
@@ -229,22 +244,31 @@ export function useDesktopUnreadCounts(options: {
     if (serverDirty) {
       serverDirty = false;
       const answer = await read();
-      // Something changed while asking: this answer is dropped, so ask again.
-      if (!isCurrent()) { serverDirty = true; return; }
+      // A different account or storage setting: this answer is dropped. Rooms or markers
+      // that moved meanwhile do not drop it; the server is asked again for them.
+      if (!sameGeneration()) { serverDirty = true; return; }
+      if (!isCurrent()) serverDirty = true;
       if (!answer) { server.value = null; serverSettled.value = true; return; }
       const previous = server.value;
       const nextStale: Record<string, string> = {};
-      server.value = Object.fromEntries(answer.rooms.flatMap((room) => {
+      const nextCounts: Record<string, { count: number; github: number }> = {};
+      const nextServer = Object.fromEntries(answer.rooms.flatMap((room) => {
         const key = roomReadKey(room.roomId);
         if (!key) return [];
         // No count right now (the access check could not say yes): keep the last server entry, not a local count.
         if (room.unreadCount === null) {
           const point = room.readMessageId ?? (previous?.[key]?.unreadCount !== null ? previous?.[key]?.readMessageId : null) ?? staleReads.value[key];
           if (point) nextStale[key] = point;
+          const before = previous?.[key];
+          const last = before && before.unreadCount !== null
+            ? { count: before.unreadCount, github: before.githubUnreadCount ?? 0 } : staleCounts.value[key];
+          if (last) nextCounts[key] = last;
         }
         return [[key, room]];
       }));
       staleReads.value = nextStale;
+      staleCounts.value = nextCounts;
+      server.value = nextServer;
       serverSettled.value = true;
     }
     const sends = pendingReports(isCurrent, accountId);
@@ -263,14 +287,16 @@ export function useDesktopUnreadCounts(options: {
         const loadPage = desktopIpc.room?.getMessagesAfter;
         if (!account) continue;
         const isCurrent = () => !disposed && revision === currentRevision;
+        const currentGeneration = generation;
+        const sameGeneration = () => !disposed && generation === currentGeneration;
         if (serverDue) {
           serverDue = false;
           try {
-            await syncServer(isCurrent);
+            await syncServer(isCurrent, sameGeneration);
           } catch {
             // Keep the last answer; the next change asks again.
             serverDirty = true;
-            if (isCurrent()) serverSettled.value = true;
+            if (sameGeneration()) serverSettled.value = true;
           }
         }
         if (!loadPage || !isCurrent()) continue;
@@ -330,11 +356,14 @@ export function useDesktopUnreadCounts(options: {
   // each local snapshot knows the visibility it was counted with.
   watch(() => [options.account.value?.id, options.storageMode.value], () => {
     revision += 1;
+    generation += 1;
     snapshots.value = {};
     server.value = null;
     staleReads.value = {};
+    staleCounts.value = {};
     elsewhereReads.value = {};
     serverSettled.value = false;
+    armGate();
     reported.clear();
     ownReports.length = 0;
   }, { flush: "sync" });
@@ -395,6 +424,7 @@ export function useDesktopUnreadCounts(options: {
     }
     disposed = true;
     revision += 1;
+    if (gateTimer) clearTimeout(gateTimer);
     if (debounceTimer) clearTimeout(debounceTimer);
   });
   return { roomCounts, totalCount, refresh, flushReports };
