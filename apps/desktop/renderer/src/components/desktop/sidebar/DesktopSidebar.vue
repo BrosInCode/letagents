@@ -16,12 +16,7 @@
     <div class="sidebar-topbar">
       <span class="sidebar-wordmark">letagents.</span>
       <div class="sidebar-topbar-actions">
-        <div class="sidebar-history" role="group" aria-label="History">
-          <button class="sidebar-topbar-action" type="button" aria-label="Back" :title="`Back (${historyKeyLabel}[)`"
-            :disabled="!canGoBack" data-testid="sidebar-back" @click="$emit('go-back')"><ChevronLeft aria-hidden="true" /></button>
-          <button class="sidebar-topbar-action" type="button" aria-label="Forward" :title="`Forward (${historyKeyLabel}])`"
-            :disabled="!canGoForward" data-testid="sidebar-forward" @click="$emit('go-forward')"><ChevronRight aria-hidden="true" /></button>
-        </div>
+        <HistoryArrows />
         <button class="sidebar-search-button" type="button" aria-label="Find a room" aria-haspopup="dialog"
           :aria-expanded="switcherOpen" :title="`Find a room (${switchShortcutLabel})`"
           :aria-keyshortcuts="switchAriaKeyShortcuts" data-testid="sidebar-search-button" @click="openRoomSwitcher">
@@ -536,9 +531,9 @@
 </template>
 
 <script setup lang="ts">
+import HistoryArrows from "../controls/HistoryArrows.vue";
 import RoomUnreadBadge from "./RoomUnreadBadge.vue";
 import {
-  ChevronLeft,
   Archive,
   Focus,
   Folder,
@@ -735,9 +730,6 @@ function playRoomOrderMove(before: Map<HTMLElement, DOMRect>, moveClass: string)
 }
 
 const props = defineProps<{
-  /** The window's history has a place before / after this one (useEntryHistory). */
-  canGoBack?: boolean;
-  canGoForward?: boolean;
   /** The person's companies; the Rooms heading becomes a company filter when there is one to show. */
   company?: FirstRunCompanyStepState | null;
   activeEntry: SidebarEntry;
@@ -760,8 +752,6 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "go-back": [];
-  "go-forward": [];
   "choose-company": [id: string | null];
   "refresh-companies": [];
   "open-company-github": [page: DesktopOrganizationGitHubPage];
@@ -829,7 +819,6 @@ const displayedProjects = computed(() => zenMode.value
   ? zenProject.value ? [zenProject.value] : []
   : props.projectEntries);
 const switchShortcutLabel = getRoomSwitcherShortcutLabel();
-const historyKeyLabel = typeof navigator !== "undefined" && navigator.platform.startsWith("Mac") ? "⌘" : "Ctrl+";
 const switchAriaKeyShortcuts = getRoomSwitcherAriaKeyShortcuts();
 
 watch(activeProject, (project, previous) => {

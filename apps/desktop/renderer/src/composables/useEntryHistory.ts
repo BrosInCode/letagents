@@ -1,7 +1,20 @@
-import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, provide, ref, watch, type ComputedRef, type InjectionKey, type Ref } from "vue";
 import type { SidebarEntry } from "../components/desktop/types";
 
 const HISTORY_LIMIT = 50;
+
+export interface EntryHistoryControls {
+  canGoBack: ComputedRef<boolean>;
+  canGoForward: ComputedRef<boolean>;
+  goBack: () => void;
+  goForward: () => void;
+}
+const entryHistoryKey: InjectionKey<EntryHistoryControls> = Symbol("entry-history");
+
+/** The window's history for HistoryArrows, wherever it is shown (provided by App.vue). */
+export function useEntryHistoryControls(): EntryHistoryControls | null {
+  return inject(entryHistoryKey, null);
+}
 
 /**
  * Back and forward through the places opened in this window: rooms, My work,
@@ -73,5 +86,7 @@ export function useEntryHistory(options: {
     window.removeEventListener("mouseup", onMouse);
   });
 
-  return { canGoBack, canGoForward, goBack, goForward };
+  const controls = { canGoBack, canGoForward, goBack, goForward };
+  provide(entryHistoryKey, controls);
+  return controls;
 }

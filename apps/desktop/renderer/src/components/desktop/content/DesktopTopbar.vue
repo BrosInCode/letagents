@@ -14,6 +14,7 @@
         <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
       </svg>
     </button>
+    <HistoryArrows v-if="sidebarMode === 'hidden'" />
     <div v-if="activeEntry.type !== 'room' && activeEntry.type !== 'inbox'" class="topbar-title">
       <p class="sidebar-label">{{ activeEntry.sectionLabel }}</p>
       <h2>{{ activeEntry.title }}</h2>
@@ -39,6 +40,7 @@
 
 <script setup lang="ts">
 import type { SidebarEntry, SidebarMode } from "../types";
+import HistoryArrows from "../controls/HistoryArrows.vue";
 
 defineProps<{
   activeEntry: SidebarEntry;

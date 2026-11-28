@@ -125,10 +125,6 @@
           @set-entry-selection="setSidebarRoomSelection"
           @batch-action="handleSidebarBatchAction"
           @select-entry="handleSidebarEntrySelected"
-          :can-go-back="entryHistory.canGoBack.value"
-          :can-go-forward="entryHistory.canGoForward.value"
-          @go-back="entryHistory.goBack"
-          @go-forward="entryHistory.goForward"
           @set-projects-collapsed="setAllProjectsCollapsed"
           @reorder-parent-room="handleSidebarParentRoomReorder"
           @reorder-child-room="handleSidebarChildRoomReorder"
@@ -188,6 +184,7 @@
               <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
             </svg>
           </button>
+          <HistoryArrows />
         </template>
       </PrivateMessages>
       <CompanyHome
@@ -364,6 +361,7 @@
           <button class="ghost-button sidebar-reveal-button" type="button" aria-label="Show sidebar" title="Show sidebar" data-testid="sidebar-reveal-button" @click="cycleSidebar">
             <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1Z" /><path d="M12.5 3.5v13" /><path d="m7.5 7.5 2.5 2.5-2.5 2.5" /></svg>
           </button>
+          <HistoryArrows />
         </template>
       </MyWorkView>
 
@@ -529,6 +527,7 @@ import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceA
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import FirstLoadVeil from "./components/desktop/content/FirstLoadVeil.vue";
+import HistoryArrows from "./components/desktop/controls/HistoryArrows.vue";
 import { provideRoomLoaderHandOff } from "./components/desktop/content/room-loader-handoff";
 import { isMembershipRefusal } from "./components/desktop/content/auth-onboarding";
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
@@ -864,7 +863,7 @@ const roomShellShown = computed(() =>
 const roomShellKeepAliveKey = useKeyWhileShown(roomShellShown, selectedRoomRenderKey);
 const roomLoaderHandOff = provideRoomLoaderHandOff(() => roomShellShown.value);
 // Back and forward through the places opened in this window (the sidebar's ‹ ›, ⌘[ and ⌘]).
-const entryHistory = useEntryHistory({
+useEntryHistory({
   activeEntry,
   open: handleSidebarEntrySelected,
   // A room that was left or deleted is skipped; other places always exist.
