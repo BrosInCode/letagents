@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parse, compileScript } from "@vue/compiler-sfc";
 import ts from "typescript";
@@ -39,7 +40,7 @@ const component = Function(
       : id.endsWith(".vue")
         ? {}
         : id.startsWith("../")
-          ? require(new URL(id, new URL("../../../../shared/ui/", import.meta.url)).pathname)
+          ? require(fileURLToPath(new URL(id, new URL("../../../../shared/ui/", import.meta.url))))
           : require(id),
   {},
 );
