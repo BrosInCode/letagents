@@ -132,7 +132,8 @@ test('actual Settings observes async reads, saved values, busy states and error/
   const until = new Date(Date.now() + 3600000).toISOString();
   try {
     await settle();
-    assert.equal(selects()[0]!.props.value, 'all');
+    // Before the read answers, the select shows the default level.
+    assert.equal(selects()[0]!.props.value, 'mentions');
     assert.ok(selects().every(node => node.props.disabled));
     reads[0].resolve({ room_id: 'r', level: 'muted', snoozed_until: until }); await settleIpc();
     assert.equal(selects()[0]!.props.value, 'muted');

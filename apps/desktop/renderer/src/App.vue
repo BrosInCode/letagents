@@ -175,7 +175,7 @@
         @refresh="refresh"
       />
 
-      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="!showCompanyHome && activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="!showCompanyHome && activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event">
+      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="!showCompanyHome && activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="!showCompanyHome && activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event" @incoming="alertForIncomingConversation">
         <template v-if="activeEntry.type === 'messages' && sidebarMode === 'hidden'" #navigation>
           <button class="ghost-button sidebar-reveal-button" type="button" aria-label="Show sidebar" title="Show sidebar" data-testid="sidebar-reveal-button" @click="cycleSidebar">
             <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
@@ -561,6 +561,7 @@ import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
+import { useAppConversationAlerts } from "./composables/app/useAppConversationAlerts";
 import { useAppMessageNotifications } from "./composables/app/useAppMessageNotifications";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
@@ -660,6 +661,7 @@ const {
 } = Object.assign(app, useAppRoomAttention(app));
 
 Object.assign(app, useAppJoinRequestAlerts(app));
+const { alertForIncomingConversation } = Object.assign(app, useAppConversationAlerts(app));
 Object.assign(app, useAppMessageNotifications(app));
 // The settings-section request belongs to one room; another room ignores it.
 function roomSettingsSectionRequestFor(roomIdentifier: string) {

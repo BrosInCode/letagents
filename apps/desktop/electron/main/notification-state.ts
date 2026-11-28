@@ -9,6 +9,12 @@ export const MAX_NOTIFICATION_TARGETS = 200;
 
 export interface PersistedNotificationState {
   enabled: boolean;
+  /**
+   * True once the person has set the "Desktop notifications" switch. Until
+   * then notifications are on: a mention or a private message must reach a
+   * person who never opened the setting.
+   */
+  enabledChosen: boolean;
   installationId: string;
   deviceToken: string | null;
   lastError: string | null;
@@ -24,7 +30,8 @@ export function emptyNotificationState(
   createInstallationId: () => string = randomUUID,
 ): PersistedNotificationState {
   return {
-    enabled: false,
+    enabled: true,
+    enabledChosen: false,
     installationId: createInstallationId(),
     deviceToken: null,
     lastError: null,
@@ -36,8 +43,11 @@ function parseNotificationState(
   parsed: Partial<PersistedNotificationState>,
   createInstallationId: () => string,
 ): PersistedNotificationState {
+  // A saved `enabled: false` without a choice is the old default, not a choice.
+  const enabledChosen = parsed.enabledChosen === true;
   return {
-    enabled: parsed.enabled === true,
+    enabled: enabledChosen ? parsed.enabled === true : true,
+    enabledChosen,
     installationId: typeof parsed.installationId === "string" && parsed.installationId
       ? parsed.installationId
       : createInstallationId(),

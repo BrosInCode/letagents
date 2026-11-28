@@ -278,6 +278,8 @@ test("human login and display-name mentions reach push enqueue without addressin
     await pool!.query(`INSERT INTO account_room_recents
       (account_id, room_id, first_opened_at, last_opened_at, updated_at)
       VALUES ($1, $2, NOW(), NOW(), NOW())`, [accountId, scenario.roomId]);
+    // Both chose All messages: the push does not depend on who is mentioned.
+    await preferenceStore!.setRoomNotificationPreference(accountId, scenario.roomId, { level: 'all' });
   }
   for (const [name, owner, login] of [["Oak", person.id, person.login], ["Pine", person.id, person.login], ["Ash", other.id, other.login]]) {
     const key = `${login}/${name!.toLowerCase()}`;
@@ -304,7 +306,8 @@ test("human login and display-name mentions reach push enqueue without addressin
   }
 });
 
-async function notificationFixture() {
+/** By default both people chose All messages in both rooms; `savedLevel: null` keeps the default. */
+async function notificationFixture({ savedLevel = 'all' as 'all' | null } = {}) {
   const person = await upsertAccount!({ provider: 'github', provider_user_id: 'notification-a', login: 'person-login' });
   const other = await upsertAccount!({ provider: 'github', provider_user_id: 'notification-b', login: 'other-login' });
   const a = await seedScenario({ states: [], accountId: person.id });
@@ -313,6 +316,7 @@ async function notificationFixture() {
   for (const accountId of [person.id, other.id]) for (const roomId of [a.roomId, otherRoom.id]) {
     await pool!.query(`INSERT INTO account_room_recents (account_id, room_id, first_opened_at, last_opened_at, updated_at)
       VALUES ($1,$2,NOW(),NOW(),NOW())`, [accountId, roomId]);
+    if (savedLevel) await preferenceStore!.setRoomNotificationPreference(accountId, roomId, { level: savedLevel });
   }
   async function send(text: string, roomId = a.roomId, options: Parameters<NonNullable<typeof addMessage>>[3] = {}) {
     const message = await addMessage!(roomId, 'Sender', text, { source: 'browser', ...options });
@@ -324,7 +328,7 @@ async function notificationFixture() {
 
 test('muting and snoozing suppress only that account and room; expiry restores the chosen level', runOptions, async () => {
   const f = await notificationFixture();
-  assert.deepEqual((await f.send('default')).devices, f.both);
+  assert.deepEqual((await f.send('all messages')).devices, f.both);
   for (const change of [
     { level: 'muted' as const },
     { level: 'all' as const, snoozed_until: new Date(Date.now() + 3_600_000).toISOString() },
@@ -340,6 +344,19 @@ test('muting and snoozing suppress only that account and room; expiry restores t
   await preferenceStore!.setRoomNotificationPreference(f.person.id, f.a.roomId, { level: 'mentions' });
   assert.deepEqual((await f.send('expired mentions without token')).devices, [f.b.deviceId]);
   assert.deepEqual((await f.send('@person-login expired mentions')).devices, f.both);
+});
+
+test('a room with no saved level pushes only a mention of the account; a snooze alone keeps that default', runOptions, async () => {
+  const f = await notificationFixture({ savedLevel: null });
+  assert.deepEqual(await preferenceStore!.getRoomNotificationPreference(f.person.id, f.a.roomId), { room_id: f.a.roomId, level: 'mentions', snoozed_until: null });
+  assert.deepEqual((await f.send('plain message')).devices, []);
+  assert.deepEqual((await f.send('@person-login please look')).devices, [f.a.deviceId]);
+  assert.deepEqual((await f.send('@person-login @other-login both')).devices, f.both);
+  await preferenceStore!.setRoomNotificationPreference(f.person.id, f.a.roomId, { snoozed_until: new Date(Date.now() + 3_600_000).toISOString() });
+  assert.equal((await preferenceStore!.getRoomNotificationPreference(f.person.id, f.a.roomId)).level, 'mentions');
+  assert.deepEqual((await f.send('@person-login while snoozed')).devices, []);
+  await preferenceStore!.setRoomNotificationPreference(f.other.id, f.a.roomId, { level: 'all' });
+  assert.deepEqual((await f.send('plain again')).devices, [f.b.deviceId], 'All messages is still a choice');
 });
 
 test('mentions-only uses the full text and literal whole login; SQL and client decisions agree', runOptions, async () => {
@@ -365,7 +382,7 @@ test('mentions-only uses the full text and literal whole login; SQL and client d
 });
 
 test('preferences reject invalid DB times and preserve independent updates without message or delivery effects', runOptions, async () => {
-  const f = await notificationFixture();
+  const f = await notificationFixture({ savedLevel: null });
   const initial = await f.send('unchanged message');
   const snapshot = async () => ({
     message: await dbModule!.getMessageById(f.a.roomId, initial.message.id),
@@ -459,20 +476,26 @@ test('enqueue preference join is unique on the complete primary key and uses its
 });
 
 
-test('bulk preferences are personal, non-default and capped at 500', runOptions, async () => {
-  const f = await notificationFixture();
+test('bulk preferences are personal, list every saved row and are capped at 500', runOptions, async () => {
+  const f = await notificationFixture({ savedLevel: null });
   await pool!.query(`INSERT INTO rooms (id,display_name,created_at)
     SELECT 'bulk-room-'||n, 'Bulk room', NOW() FROM generate_series(1,503) n`);
   await pool!.query(`INSERT INTO account_room_notification_preferences (account_id,room_id,level)
     SELECT $1, 'bulk-room-'||n, 'muted' FROM generate_series(1,501) n`, [f.person.id]);
-  await preferenceStore!.setRoomNotificationPreference(f.person.id, 'bulk-room-502', { level: 'all' });
-  await pool!.query(`INSERT INTO account_room_notification_preferences (account_id,room_id,level,snoozed_until)
-    VALUES ($1,'bulk-room-503','all',NOW()-INTERVAL '1 second')`, [f.person.id]);
   const list = await preferenceStore!.listRoomNotificationPreferences(f.person.id);
   assert.equal(list.preferences.length, 500);
   assert.equal(list.truncated, true);
   assert.ok(list.preferences.every((row) => row.level === 'muted'));
-  assert.deepEqual(await preferenceStore!.listRoomNotificationPreferences(f.other.id), { preferences: [], truncated: false });
+  // Saved All messages and Mentions only rows are listed too: an older client
+  // reads a missing row as All messages, a newer one as Mentions only.
+  await preferenceStore!.setRoomNotificationPreference(f.other.id, 'bulk-room-502', { level: 'all' });
+  await preferenceStore!.setRoomNotificationPreference(f.other.id, 'bulk-room-503', { level: 'mentions' });
+  await pool!.query(`INSERT INTO account_room_notification_preferences (account_id,room_id,level,snoozed_until)
+    VALUES ($1,'bulk-room-501','all',NOW()-INTERVAL '1 second')`, [f.other.id]);
+  assert.deepEqual((await preferenceStore!.listRoomNotificationPreferences(f.other.id)).preferences.map((row) => [row.room_id, row.level]),
+    [['bulk-room-501', 'all'], ['bulk-room-502', 'all'], ['bulk-room-503', 'mentions']]);
+  const stranger = await upsertAccount!({ provider: 'github', provider_user_id: 'notification-stranger', login: 'stranger-login' });
+  assert.deepEqual(await preferenceStore!.listRoomNotificationPreferences(stranger.id), { preferences: [], truncated: false });
 });
 
 test('GitHub account lookup matches only the GitHub user id', runOptions, async () => {

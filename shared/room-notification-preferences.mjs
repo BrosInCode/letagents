@@ -1,5 +1,7 @@
 export const ROOM_NOTIFICATION_LEVELS = ['all', 'mentions', 'muted'];
-export const DEFAULT_ROOM_NOTIFICATION_PREFERENCE = Object.freeze({ level: 'all', snoozed_until: null });
+// A room the person never set alerts only when it mentions them (private
+// messages always alert). Agent rooms are busy: "All messages" is a choice.
+export const DEFAULT_ROOM_NOTIFICATION_PREFERENCE = Object.freeze({ level: 'mentions', snoozed_until: null });
 // Shared with PostgreSQL's regex predicate. A final sentence period is punctuation;
 // a dot followed by a handle character is part of a longer handle.
 export const PERSON_MENTION_START = '(^|[^A-Za-z0-9_./@:-])@';
@@ -39,7 +41,7 @@ export function roomNotificationsSuppressed(preference, now = Date.now()) {
 
 export function allowsRoomNotification(preference, text, login, now = Date.now()) {
   if (roomNotificationsSuppressed(preference, now)) return false;
-  return preference?.level !== 'mentions' || mentionsPerson(text, login);
+  return (preference?.level ?? DEFAULT_ROOM_NOTIFICATION_PREFERENCE.level) !== 'mentions' || mentionsPerson(text, login);
 }
 
 export function roomNotificationSnoozeUntil(preset, now = new Date()) {

@@ -194,11 +194,12 @@ test("a message send wakes the push queue after its rows commit", { skip }, asyn
       .then((result) => result.rows[0]!.n));
   });
   try {
-    await api!.addMessage(room.id, "Agent", "ping", { source: "agent" });
+    // A room with no saved level pushes a mention of the account.
+    await api!.addMessage(room.id, "Agent", `@${account.login} ping`, { source: "agent" });
     assert.equal(seen.length, 1, "one wake for the send");
     assert.equal(await seen[0], 1, "the queued push is committed when the wake fires");
     // A send that queues no push (the room's only device belongs to the sender) does not wake.
-    await api!.addMessage(room.id, "Ada", "mine", { source: "browser", account_id: account.id });
+    await api!.addMessage(room.id, "Ada", `@${account.login} mine`, { source: "browser", account_id: account.id });
     assert.equal(seen.length, 1);
   } finally {
     off();

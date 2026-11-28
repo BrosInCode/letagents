@@ -53,6 +53,34 @@ test("desktop notification state persists privately and survives a restart", asy
   });
 });
 
+test("desktop notifications are on until the person sets the switch", async () => {
+  await withTemporaryStateFile(async (statePath) => {
+    // A new install: no file yet.
+    const fresh = await new DesktopNotificationStateStore(statePath, () => "installation-new").read();
+    assert.equal(fresh.enabled, true);
+    assert.equal(fresh.enabledChosen, false);
+
+    // A file saved by an older app: `enabled: false` was its default, not a choice.
+    await writeFile(statePath, JSON.stringify({ enabled: false, installationId: "installation-old", deviceToken: null, lastError: null, targets: [] }));
+    const old = await new DesktopNotificationStateStore(statePath).read();
+    assert.equal(old.enabled, true);
+    assert.equal(old.enabledChosen, false);
+    assert.equal(old.installationId, "installation-old");
+
+    // A choice survives a restart, off as well as on.
+    for (const enabled of [false, true]) {
+      const store = new DesktopNotificationStateStore(statePath);
+      const current = await store.read();
+      current.enabled = enabled;
+      current.enabledChosen = true;
+      await store.persist();
+      const restored = await new DesktopNotificationStateStore(statePath).read();
+      assert.equal(restored.enabled, enabled);
+      assert.equal(restored.enabledChosen, true);
+    }
+  });
+});
+
 test("desktop notification state sanitizes, caps, and de-duplicates targets", async () => {
   await withTemporaryStateFile(async (statePath) => {
     const oversizedTargets = Array.from(
@@ -61,6 +89,7 @@ test("desktop notification state sanitizes, caps, and de-duplicates targets", as
     );
     await writeFile(statePath, JSON.stringify({
       enabled: "yes",
+      enabledChosen: true,
       installationId: "installation-existing",
       deviceToken: 123,
       lastError: false,

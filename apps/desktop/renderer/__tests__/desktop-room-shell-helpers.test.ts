@@ -623,9 +623,14 @@ describe("desktop room shell preferences", () => {
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/other"), false);
     });
 
+    withLocalStorage({ "letagents-desktop:notifications": "off" }, () => {
+      assert.equal(readNotificationsEnabled(), false);
+    });
+
+    // Notifications are on until the person turns them off.
     withLocalStorage({}, () => {
       assert.equal(readSoundEnabled(), true);
-      assert.equal(readNotificationsEnabled(), false);
+      assert.equal(readNotificationsEnabled(), true);
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
     });
   });
@@ -647,7 +652,7 @@ describe("desktop room shell preferences", () => {
   it("falls back when storage or notification APIs are unavailable", () => {
     withThrowingLocalStorage(() => {
       assert.equal(readSoundEnabled(), true);
-      assert.equal(readNotificationsEnabled(), false);
+      assert.equal(readNotificationsEnabled(), true);
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
     });
 
