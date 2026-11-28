@@ -125,6 +125,10 @@
           @set-entry-selection="setSidebarRoomSelection"
           @batch-action="handleSidebarBatchAction"
           @select-entry="handleSidebarEntrySelected"
+          :can-go-back="entryHistory.canGoBack.value"
+          :can-go-forward="entryHistory.canGoForward.value"
+          @go-back="entryHistory.goBack"
+          @go-forward="entryHistory.goForward"
           @set-projects-collapsed="setAllProjectsCollapsed"
           @reorder-parent-room="handleSidebarParentRoomReorder"
           @reorder-child-room="handleSidebarChildRoomReorder"
@@ -534,6 +538,8 @@ import OnboardingFlow from "./components/desktop/onboarding/OnboardingFlow.vue";
 import { useFilmGrainBehind } from "./components/desktop/onboarding/useFilmGrain";
 import { useAppAppearance } from "./composables/useAppAppearance";
 import { useRootStyle } from "./composables/useRootStyle";
+import { useEntryHistory } from "./composables/useEntryHistory";
+import { flattenSidebarRoomEntries } from "./domain/sidebar-room-selection";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -857,6 +863,15 @@ const roomShellShown = computed(() =>
   !showCompanyHome.value && activeEntry.value.type === "room" && !selectedNeedsAccess.value);
 const roomShellKeepAliveKey = useKeyWhileShown(roomShellShown, selectedRoomRenderKey);
 const roomLoaderHandOff = provideRoomLoaderHandOff(() => roomShellShown.value);
+// Back and forward through the places opened in this window (the sidebar's ‹ ›, ⌘[ and ⌘]).
+const entryHistory = useEntryHistory({
+  activeEntry,
+  open: handleSidebarEntrySelected,
+  // A room that was left or deleted is skipped; other places always exist.
+  resolve: (entry) => entry.type !== "room" ? entry
+    : flattenSidebarRoomEntries(app.projectEntries.value).find((room) => room.id === entry.id)
+      ?? (entry.id === currentParentRoom.value.id ? currentParentRoom.value : null),
+});
 // The first load shows only the ink (FirstLoadVeil) until the room arrives, or
 // until it is answered otherwise (an error, a sign-in step, another page).
 const firstLoadDone = ref(false);
