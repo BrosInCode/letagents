@@ -34,6 +34,21 @@ export function localAccountRoomKeys(accountRooms: readonly Pick<DesktopAccountR
 }
 
 /**
+ * The read keys of every room the server lists for the account (not a device
+ * only entry). A server room is cloud even when its id starts with `local-`.
+ */
+export function serverAccountRoomKeys(accountRooms: readonly Pick<DesktopAccountRoomEntry, "roomIdentifier" | "source" | "focusRooms">[]): Set<string> {
+  const keys = new Set<string>();
+  for (const room of accountRooms) {
+    for (const entry of [room, ...room.focusRooms]) {
+      const key = entry.source === "local" ? null : roomReadKey(entry.roomIdentifier);
+      if (key) keys.add(key);
+    }
+  }
+  return keys;
+}
+
+/**
  * Derive sidebar latest-message state from the `/account/rooms` payload that is
  * already in memory (top-level rooms AND their focus rooms), avoiding a
  * per-room `/rooms/:id/messages` fan-out on every sidebar refresh. Sidebar rooms

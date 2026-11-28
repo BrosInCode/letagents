@@ -652,3 +652,34 @@ test("the account activity feed asks a join card to check on a reconnect, not on
     assert.equal(reconnects.length, 1, "a reconnect asks once");
   } finally { scope.stop(); }
 });
+
+test("a room the server lists is cloud history even with a local- id; real local rooms stay local", async () => {
+  const module = await vite.ssrLoadModule("/renderer/src/composables/app/useAppSidebarMessages.ts") as {
+    useAppSidebarMessages(app: unknown): {
+      roomHistoryMode(id: string): "cloud" | "local";
+      withRoomUnreadState(entry: Record<string, unknown>): { localOnly?: boolean };
+    };
+  };
+  const serverRoom = "local-autodownloader-7d47027e95";
+  const accountRooms = Vue.ref([
+    { roomIdentifier: serverRoom, source: "account", focusRooms: [] },
+    { roomIdentifier: "local-project-0123456789", source: "local", focusRooms: [] },
+  ]);
+  const app = {
+    accountRooms, authStatus: Vue.ref(authStatus), chatStorageSettings: Vue.ref({ mode: "cloud", roomOverrides: {} }),
+    readRoomMessageIds: Vue.ref({}), selectedSnapshot: Vue.ref(null), sessionGeneration: Vue.ref(1),
+    sidebarLatestMessages: Vue.ref({}), sidebarMetadataRefresh: {}, windowFocused: Vue.ref(true), windowHidden: Vue.ref(false),
+    activeEntry: Vue.ref({ type: "system" }), projectEntries: Vue.ref([]),
+    accountActivity: { index: Vue.ref(new Map()) }, unreadRoomCounts: Vue.ref({}), unreadRoomMentionCounts: Vue.ref({}),
+  };
+  const scope = Vue.effectScope();
+  const sidebar = scope.run(() => module.useAppSidebarMessages(app))!;
+  try {
+    assert.equal(sidebar.roomHistoryMode(serverRoom), "cloud");
+    assert.equal(sidebar.withRoomUnreadState({ roomIdentifier: serverRoom }).localOnly, false);
+    for (const local of ["local-project-0123456789", "local_5c489963-1111-2222-3333-444444444444", "git-room:local:abc123", "local-unlisted-abcdef0123"]) {
+      assert.equal(sidebar.roomHistoryMode(local), "local", local);
+      assert.equal(sidebar.withRoomUnreadState({ roomIdentifier: local }).localOnly, true, local);
+    }
+  } finally { scope.stop(); }
+});

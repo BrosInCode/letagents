@@ -314,6 +314,9 @@ export function isLocalOnlyRoomIdentifier(identifier: string | null | undefined)
   return /^local[_-]/i.test(value) || isLocalGitRoomIdentifier(value);
 }
 
+/** The id shape the desktop gives a room it derives from a project folder. */
+const FOLDER_DERIVED_LOCAL_ROOM_ID = /^local-[a-z0-9-]+-[a-f0-9]{10}$/;
+
 export function assertLocalRoomPublishable(room: DesktopLocalRoomInfo): void {
   if (room.gitRoom?.accessMode === "local" || isLocalGitRoomIdentifier(room.roomIdentifier)) {
     throw new Error("Local Git Rooms stay local until a provider is attached.");
@@ -626,7 +629,13 @@ export async function resolveLocalAwareRoomStorageMode(
     ? await getLocalRoom(trimmedRoomIdentifier)
       || await getLocalRoomByCloudRoom(trimmedRoomIdentifier)
     : null;
-  const localIdentifier = isLocalOnlyRoomIdentifier(trimmedRoomIdentifier);
+  // A folder-derived `local-<slug>-<hex>` id is local only while this device
+  // holds a local room with that id. Without one it is a server room that got
+  // the same shape (an older client joined by the derived name), so it is cloud.
+  const localIdentifier = isLocalOnlyRoomIdentifier(trimmedRoomIdentifier)
+    && !(FOLDER_DERIVED_LOCAL_ROOM_ID.test(trimmedRoomIdentifier)
+      && localRoom?.roomIdentifier !== trimmedRoomIdentifier
+      && !await getLocalRoomIncludingArchived(trimmedRoomIdentifier));
   const localOnlyRoom = Boolean(localRoom && !localRoom.cloudRoomIdentifier);
   const requestedIdentifier = resolved.roomIdentifier;
   const requestedLocalRoom = Boolean(

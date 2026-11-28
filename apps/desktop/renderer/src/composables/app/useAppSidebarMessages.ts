@@ -8,6 +8,7 @@ import {
   deriveSidebarLatestMessages,
   isRoomBeingRead,
   localAccountRoomKeys,
+  serverAccountRoomKeys,
   markRoomRead,
   readStoredRoomMessageIds,
   roomReadKey,
@@ -135,9 +136,14 @@ export function useAppSidebarMessages(context: unknown) {
 
   // One set per room-list change; each sidebar row then checks its room in constant time.
   const localRoomKeys = computed(() => localAccountRoomKeys(accountRooms.value));
+  const serverRoomKeys = computed(() => serverAccountRoomKeys(accountRooms.value));
+  /** A local-looking id is local only when the server does not list that room. */
+  function roomIsLocalOnly(identifier: string): boolean {
+    return /^local[_-]|^git-room:local:/i.test(identifier) && !serverRoomKeys.value.has(roomReadKey(identifier) ?? "");
+  }
   function roomUsesLocalHistory(identifier: string): boolean {
     const override = chatStorageSettings.value?.roomOverrides[identifier];
-    return /^local[_-]|^git-room:local:/i.test(identifier)
+    return roomIsLocalOnly(identifier)
       || localRoomKeys.value.has(roomReadKey(identifier) ?? "")
       || (override && override !== "inherit" ? override : chatStorageSettings.value?.mode) === "local";
   }
@@ -163,6 +169,7 @@ export function useAppSidebarMessages(context: unknown) {
     const latestMessageId = latestMessageIdForEntry(entry);
     return {
       ...entry,
+      localOnly: roomIsLocalOnly(entry.roomIdentifier || ""),
       activity: sidebarActivityFor(app.accountActivity.index.value, entry.roomIdentifier),
       latestMessageId,
       latestMessageAt: latestMessageAtForEntry(entry),

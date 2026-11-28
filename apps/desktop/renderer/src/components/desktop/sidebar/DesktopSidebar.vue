@@ -1052,7 +1052,7 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
 
 function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopContextMenuItem[][] {
   const notificationState = roomNotificationState(entry.roomIdentifier || "");
-  const localOnly = /^local[_-]|^git-room:local:/i.test(entry.roomIdentifier || "") || entry.gitRoom?.accessMode === "local";
+  const localOnly = (entry.localOnly ?? /^local[_-]|^git-room:local:/i.test(entry.roomIdentifier || "")) || entry.gitRoom?.accessMode === "local";
   const unavailable = localOnly ? "Notification settings require a cloud room." : !props.authStatus?.authenticated ? "Sign in to manage your notifications." : "";
   const project = projectId
     ? props.projectEntries.find((candidate) => candidate.id === projectId && projectChildRooms(candidate).length)

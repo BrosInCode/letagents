@@ -917,6 +917,30 @@ test("desktop storage resolver applies app default, room overrides, and local me
   assert.equal(settings.roomOverrides.forked_room, "cloud");
 });
 
+test("a server room with a folder-derived local- id is cloud, a real local room stays local", async () => {
+  const serverRoom = "local-autodownloader-7d47027e95";
+  // No local room holds this id: the server created it, so history and sending are cloud.
+  const cloud = await resolveLocalAwareRoomStorageMode(serverRoom);
+  assert.equal(cloud.effectiveMode, "cloud");
+  assert.equal(cloud.isLocalRoom, false);
+
+  // An archived local room that links to it by cloud id does not make it local.
+  const archived = await createLocalRoom({ displayName: "fern-river", cloudRoomIdentifier: serverRoom });
+  await setLocalRoomArchived(archived.roomIdentifier, true);
+  assert.equal((await resolveLocalAwareRoomStorageMode(serverRoom)).effectiveMode, "cloud");
+
+  // A real folder-derived room exists in the local store, so it stays local (also when archived).
+  const folderRoom = "local-project-0123456789";
+  await createLocalRoom({ roomIdentifier: folderRoom, displayName: "Project" });
+  assert.equal((await resolveLocalAwareRoomStorageMode(folderRoom)).effectiveMode, "local");
+  await setLocalRoomArchived(folderRoom, true);
+  assert.equal((await resolveLocalAwareRoomStorageMode(folderRoom)).effectiveMode, "local");
+
+  // Other local prefixes never become cloud.
+  assert.equal((await resolveLocalAwareRoomStorageMode("local_5c489963-0000-0000-0000-000000000000")).effectiveMode, "local");
+  assert.equal((await resolveLocalAwareRoomStorageMode("local-not-derived")).effectiveMode, "local");
+});
+
 test("desktop linked local rooms keep separate local and cloud identifiers", async () => {
   const cloudRoomIdentifier = "github.com/BrosInCode/linked-local-room";
   const linked = await createLocalRoom({

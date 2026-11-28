@@ -343,3 +343,13 @@ it("local account rooms are found by read key, focus rooms included, in one pass
   for (let row = 0; row < 500; row += 1) keys.has("github.com/org/repo");
   assert.equal(reads, 6);
 });
+
+it("server account rooms are found by read key, device-only entries left out", async () => {
+  const { serverAccountRoomKeys } = await import("../src/domain/desktop-room-read-state");
+  const entry = (roomIdentifier: string, source: string | null, focusRooms: unknown[] = []) => ({ roomIdentifier, source, focusRooms });
+  const keys = serverAccountRoomKeys([
+    entry("Local-Autodownloader-7d47027e95", "account", [entry("focus_1", null), entry("focus_2", "local")]),
+    entry("local_5c489963", "local"),
+  ] as never);
+  assert.deepEqual([...keys].sort(), ["focus_1", "local-autodownloader-7d47027e95"]);
+});
