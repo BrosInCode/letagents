@@ -1,4 +1,15 @@
 <template>
+  <!--
+    Start-up: one ink scene from the first frame, over the splash and the first room
+    load, until the room (or its answer: sign-in, onboarding, an error) is ready.
+  -->
+  <Transition
+    name="room-arrival"
+    @before-leave="roomLoaderHandOff.beforeLeave"
+    @after-leave="roomLoaderHandOff.afterLeave"
+  >
+    <FirstLoadVeil v-if="firstLoadVeil" :label="selectedRoomInfo.displayName || selectedRoomInfo.name || 'LetAgents'" />
+  </Transition>
   <FirstRunSplashView v-if="showFirstRunSplash" />
 
   <main
@@ -60,14 +71,6 @@
     data-testid="desktop-shell"
     data-app-texture
   >
-    <!-- The first load: only the ink until the room (or its answer) is ready. -->
-    <Transition
-      name="room-arrival"
-      @before-leave="roomLoaderHandOff.beforeLeave"
-      @after-leave="roomLoaderHandOff.afterLeave"
-    >
-      <FirstLoadVeil v-if="firstLoadVeil" :label="selectedRoomInfo.displayName || selectedRoomInfo.name || 'LetAgents'" />
-    </Transition>
     <Transition name="desktop-sidebar">
       <div
         v-show="!isSettingsSurface && sidebarMode !== 'hidden'"
@@ -859,6 +862,10 @@ const roomLoaderHandOff = provideRoomLoaderHandOff(() => roomShellShown.value);
 const firstLoadDone = ref(false);
 // Not during the onboarding's flight into the first room: it shows its own arrival.
 const firstLoadVeil = computed(() => !firstLoadDone.value && !roomArrival.value);
+// Sign-in and onboarding are answers too: the veil gives way to their screens.
+watchEffect(() => {
+  if (!firstLoadDone.value && !showFirstRunSplash.value && (showFirstRunGate.value || showSignedOutGate.value)) firstLoadDone.value = true;
+});
 // App's setup runs before the startup load begins: "nothing loading" counts as
 // done only once a load has been seen.
 let firstLoadSeen = false;
