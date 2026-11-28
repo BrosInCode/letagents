@@ -31,6 +31,10 @@ describe("desktop sidebar unread badge contract", () => {
     const child = readFileSync(new URL("../src/components/desktop/sidebar/SidebarChildRoom.vue", import.meta.url), "utf8");
     assert.match(switcher, /<RoomUnreadBadge :count="option\.entry\.unreadCount \|\| 0" :mention-count="option\.entry\.mentionCount \|\| 0" :marked-unread="option\.entry\.hasUnread" \/>/);
     assert.match(child, /<RoomUnreadBadge :count="entry\.unreadCount \|\| 0" :mention-count="entry\.mentionCount \|\| 0" :marked-unread="entry\.hasUnread" \/>/);
+    // Teleported to <body>, the switcher is outside .app-sidebar: without its
+    // own colour the badge was white on white in light mode.
+    assert.match(switcher, /<Teleport to="body">/);
+    assert.match(switcher, /\.sidebar-switcher \{\s*--sidebar-selection: var\(--workspace-selection, var\(--blue\)\);/);
   });
 
   it("group and overflow badges carry the mention total of the rooms they count", () => {

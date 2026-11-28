@@ -117,7 +117,11 @@ function chooseActive(): void {
   padding: clamp(40px, 14vh, 145px) 20px 20px;
   background: var(--overlay-scrim);
 }
+/* The switcher is teleported out of .app-sidebar, so it sets the colour its
+   unread and "@" badges read from there. */
 .sidebar-switcher {
+  --sidebar-selection: var(--workspace-selection, var(--blue));
+
   display: flex;
   flex-direction: column;
   width: 490px;
