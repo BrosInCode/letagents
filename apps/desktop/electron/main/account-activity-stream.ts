@@ -50,17 +50,25 @@ function publish(next: DesktopAccountActivityState): void {
  * stream, which is how a changed set of rooms is picked up.
  */
 export function restartAccountActivityStream(): void {
-  stopAccountActivityStream();
+  // The last rooms stay published until the new stream's snapshot replaces them.
+  closeStream();
+  if (state.connected) publish({ ...state, connected: false });
   const next: Stream = { abort: new AbortController(), retryTimer: null, retryMs: FIRST_RETRY_MS };
   stream = next;
   void connect(next);
 }
 
-export function stopAccountActivityStream(): void {
-  if (!stream) return;
+function closeStream(): boolean {
+  if (!stream) return false;
   stream.abort.abort();
   if (stream.retryTimer) clearTimeout(stream.retryTimer);
   stream = null;
+  return true;
+}
+
+/** A real stop (sign-out, shutdown): the rooms are cleared. */
+export function stopAccountActivityStream(): void {
+  if (!closeStream()) return;
   publish({ connected: false, rooms: {} });
 }
 
