@@ -47,7 +47,7 @@
         >
           <span class="sidebar-switcher-icon" aria-hidden="true"><GitBranch v-if="option.entry.kind === 'branch'" /><MessageSquare v-else-if="option.entry.kind === 'focus'" /><Folder v-else /></span>
           <span class="sidebar-switcher-copy"><strong>{{ option.title }}</strong><small>{{ option.detail }}</small></span>
-          <RoomUnreadBadge :count="option.entry.unreadCount || 0" :marked-unread="option.entry.hasUnread" />
+          <RoomUnreadBadge :count="option.entry.unreadCount || 0" :mention-count="option.entry.mentionCount || 0" :marked-unread="option.entry.hasUnread" />
           <span v-if="option.entry.id === activeEntryId || (option.entry.kind === 'parent' && option.projectId === activeProjectId)" class="sidebar-switcher-current">Current<Check aria-hidden="true" /></span>
           <ChevronRight v-else class="sidebar-switcher-arrow" aria-hidden="true" />
         </div>
@@ -117,7 +117,11 @@ function chooseActive(): void {
   padding: clamp(40px, 14vh, 145px) 20px 20px;
   background: var(--overlay-scrim);
 }
+/* The switcher is teleported out of .app-sidebar, so it sets the colour its
+   unread and "@" badges read from there. */
 .sidebar-switcher {
+  --sidebar-selection: var(--workspace-selection, var(--blue));
+
   display: flex;
   flex-direction: column;
   width: 490px;

@@ -26,6 +26,8 @@ export type RoomEntry = {
   /** Agents working in this room right now, as the activity stream reports. */
   activity?: SidebarRoomActivity | null;
   unreadCount?: number;
+  /** How many of the unread messages mention the viewer (`@login`); the badge then shows "@". */
+  mentionCount?: number;
   pinned: boolean;
   source: "current" | "account" | "recent";
 };

@@ -20,7 +20,7 @@ async function server(auth: string | null) {
         { room_id: 'invite-room', role: 'participant', latest_message_at: 'T2', focus_rooms: [] },
       ];
     }) as never,
-    loadAccountRoomUnread: (async (input: unknown) => { calls.push(['unread', input]); return [{ room_id: 'invite-room', read_message_id: 'msg_3', unread_count: 4, github_unread_count: 1 }]; }) as never,
+    loadAccountRoomUnread: (async (input: unknown) => { calls.push(['unread', input]); return [{ room_id: 'invite-room', read_message_id: 'msg_3', unread_count: 4, github_unread_count: 1, mention_unread_count: 2 }]; }) as never,
     loadAccountAttention: (async (account: unknown, rooms: unknown) => { calls.push(['attention', rooms]); return { rooms: [], failures: [{ room_id: 'focus_1' }] }; }) as never,
     // GitHub cannot answer for the repo room right now.
     mayCount: async (_accountId: string, roomId: string) => roomId !== 'github.com/org/repo',
@@ -48,14 +48,14 @@ test('account unread covers the listed rooms and their focus rooms, with the per
     const response = await fetch(`${s.base}/account/unread`);
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { rooms: [
-      { room_id: 'github.com/org/repo', read_message_id: null, unread_count: null, github_unread_count: null },
-      { room_id: 'focus_1', read_message_id: null, unread_count: null, github_unread_count: null },
-      { room_id: 'invite-room', read_message_id: 'msg_3', unread_count: 4, github_unread_count: 1 },
+      { room_id: 'github.com/org/repo', read_message_id: null, unread_count: null, github_unread_count: null, mention_unread_count: null },
+      { room_id: 'focus_1', read_message_id: null, unread_count: null, github_unread_count: null, mention_unread_count: null },
+      { room_id: 'invite-room', read_message_id: 'msg_3', unread_count: 4, github_unread_count: 1, mention_unread_count: 2 },
     ], cap: 1000, limited: false });
     assert.equal(s.calls.length, 2);
     const [, unread] = s.calls as [unknown, [string, { roomIds: string[] }]];
     assert.deepEqual({ ...unread[1], roomIds: [...unread[1].roomIds].sort() },
-      { accountId: 'acct-1', ownSenderNames: ['Emmy', 'Emmy M'], roomIds: ['focus_1', 'invite-room'] },
+      { accountId: 'acct-1', ownSenderNames: ['Emmy', 'Emmy M'], mentionLogin: 'Emmy', roomIds: ['focus_1', 'invite-room'] },
       'a room whose access cannot be decided now is not counted');
   } finally { await s.close(); }
 });

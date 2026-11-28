@@ -4,7 +4,7 @@ import type { DesktopAccountUnread } from "../../ipc-types/unread.js";
 import { apiFetch, DesktopApiError } from "../auth.js";
 import { cloudRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from "./local-store.js";
 
-type ServerRoomUnread = { room_id?: unknown; read_message_id?: unknown; unread_count?: unknown; github_unread_count?: unknown };
+type ServerRoomUnread = { room_id?: unknown; read_message_id?: unknown; unread_count?: unknown; github_unread_count?: unknown; mention_unread_count?: unknown };
 
 const countOrNull = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
 
@@ -28,6 +28,7 @@ export async function getDesktopAccountUnread(): Promise<DesktopAccountUnread | 
       readMessageId: typeof room.read_message_id === "string" ? room.read_message_id : null,
       unreadCount: countOrNull(room.unread_count),
       githubUnreadCount: countOrNull(room.github_unread_count),
+      mentionUnreadCount: countOrNull(room.mention_unread_count),
     }] : []),
   };
 }

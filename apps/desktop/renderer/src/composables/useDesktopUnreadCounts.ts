@@ -85,7 +85,7 @@ export function useDesktopUnreadCounts(options: {
    * counted here from the later of this point and this device's confirmed read.
    */
   /** The server's last counts for those rooms, shown until the local count from the read point has loaded. */
-  const staleCounts = ref<Record<string, { count: number; github: number }>>({});
+  const staleCounts = ref<Record<string, { count: number; github: number; mentions: number }>>({});
   const staleReads = ref<Record<string, string>>({});
   /** The newest read other devices or the web reported, by room key (from `room_read` frames). */
   const elsewhereReads = ref<Record<string, number>>({});
@@ -146,9 +146,12 @@ export function useDesktopUnreadCounts(options: {
     return savedNumber > (messageNumber(remote.readMessageId) ?? 0) ? saved : null;
   }
 
-  const roomCounts = computed(() => {
+  /** Each room's unread count, and how many of those messages mention the account, in one pass. */
+  const roomState = computed(() => {
     const counts: Record<string, number> = {};
-    if (!options.account.value) return counts;
+    const mentions: Record<string, number> = {};
+    const result = { counts, mentions };
+    if (!options.account.value) return result;
     void githubEventsVisibilityRevision.value;
     const reading = roomReadKey(options.readingRoom?.() ?? null);
     for (const room of options.rooms.value) {
@@ -157,7 +160,7 @@ export function useDesktopUnreadCounts(options: {
       const marker = localMarker(key);
       const remote = serverRoom(room);
       if (remote) {
-        if (key === reading) { counts[key] = 0; continue; }
+        if (key === reading) { counts[key] = 0; mentions[key] = 0; continue; }
         // Seen here just now and not yet on the server: nothing is unread.
         const seen = confirmed(key);
         const latest = messageNumber(room.latestMessageId);
@@ -167,24 +170,33 @@ export function useDesktopUnreadCounts(options: {
         const saved = legacyMarkerFor(room);
         const fromHere = saved && snapshot?.readMessageId === saved
           ? (saved === room.latestMessageId ? 0 : snapshot.count) : null;
-        counts[key] = seen !== null && latest !== null && seen >= latest ? 0
-          : fromHere === null ? fromServer : Math.min(fromServer, fromHere);
+        const seenAll = seen !== null && latest !== null && seen >= latest;
+        counts[key] = seenAll ? 0 : fromHere === null ? fromServer : Math.min(fromServer, fromHere);
+        // A server that sends no mention count (older) shows none.
+        const mentionsFromServer = remote.mentionUnreadCount ?? 0;
+        mentions[key] = seenAll ? 0
+          : fromHere === null ? mentionsFromServer : Math.min(mentionsFromServer, snapshot?.mentionCount ?? mentionsFromServer);
         continue;
       }
       // A cloud room waits for the server's first answer instead of flashing a local count.
       if (historyMode(room.roomIdentifier) === "cloud" && !serverSettled.value && desktopIpc.room?.getAccountUnread) {
         counts[key] = 0;
+        mentions[key] = 0;
         continue;
       }
       const snapshot = snapshots.value[key];
       const last = staleCounts.value[key];
-      counts[key] = marker && marker !== room.latestMessageId && snapshot?.readMessageId === marker ? snapshot.count
-        : marker && marker !== room.latestMessageId && last
-          ? last.count + (readGitHubEventsVisible(room.roomIdentifier) ? last.github : 0)
-          : 0;
+      const unread = Boolean(marker && marker !== room.latestMessageId);
+      const fromSnapshot = unread && snapshot?.readMessageId === marker ? snapshot : null;
+      const fromLast = unread && !fromSnapshot ? last : undefined;
+      counts[key] = fromSnapshot ? fromSnapshot.count
+        : fromLast ? fromLast.count + (readGitHubEventsVisible(room.roomIdentifier) ? fromLast.github : 0) : 0;
+      mentions[key] = fromSnapshot ? fromSnapshot.mentionCount ?? 0 : fromLast?.mentions ?? 0;
     }
-    return counts;
+    return result;
   });
+  const roomCounts = computed(() => roomState.value.counts);
+  const roomMentionCounts = computed(() => roomState.value.mentions);
   const totalCount = computed(() => Object.values(roomCounts.value).reduce((sum, count) => sum + count, 0));
 
   /**
@@ -220,7 +232,7 @@ export function useDesktopUnreadCounts(options: {
           const latest = messageNumber(room.latestMessageId);
           if (latest !== null && seen >= latest) {
             // Read to the end: nothing is unread, without asking again.
-            server.value = { ...server.value, [key]: { ...current, readMessageId: seenId, unreadCount: 0, githubUnreadCount: 0 } };
+            server.value = { ...server.value, [key]: { ...current, readMessageId: seenId, unreadCount: 0, githubUnreadCount: 0, mentionUnreadCount: 0 } };
           } else {
             // Read part of the way: only the server knows how many are left. Ask once.
             server.value = { ...server.value, [key]: { ...current, readMessageId: seenId } };
@@ -251,7 +263,7 @@ export function useDesktopUnreadCounts(options: {
       if (!answer) { server.value = null; serverSettled.value = true; return; }
       const previous = server.value;
       const nextStale: Record<string, string> = {};
-      const nextCounts: Record<string, { count: number; github: number }> = {};
+      const nextCounts: Record<string, { count: number; github: number; mentions: number }> = {};
       const nextServer = Object.fromEntries(answer.rooms.flatMap((room) => {
         const key = roomReadKey(room.roomId);
         if (!key) return [];
@@ -261,7 +273,7 @@ export function useDesktopUnreadCounts(options: {
           if (point) nextStale[key] = point;
           const before = previous?.[key];
           const last = before && before.unreadCount !== null
-            ? { count: before.unreadCount, github: before.githubUnreadCount ?? 0 } : staleCounts.value[key];
+            ? { count: before.unreadCount, github: before.githubUnreadCount ?? 0, mentions: before.mentionUnreadCount ?? 0 } : staleCounts.value[key];
           if (last) nextCounts[key] = last;
         }
         return [[key, room]];
@@ -317,6 +329,7 @@ export function useDesktopUnreadCounts(options: {
                 latestMessageId: room.latestMessageId,
                 previous,
                 ownSenderNames: [account.login, account.displayName || ""],
+                mentionLogin: account.login,
                 githubEventsVisible: readGitHubEventsVisible(room.roomIdentifier),
                 loadPage: (after) => sharedRoomMessagePages.load({
                   accountId: account.id, reader: "unread", roomIdentifier: room.roomIdentifier, afterMessageId: after,
@@ -427,5 +440,5 @@ export function useDesktopUnreadCounts(options: {
     if (gateTimer) clearTimeout(gateTimer);
     if (debounceTimer) clearTimeout(debounceTimer);
   });
-  return { roomCounts, totalCount, refresh, flushReports };
+  return { roomCounts, roomMentionCounts, totalCount, refresh, flushReports };
 }

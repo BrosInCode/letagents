@@ -17,13 +17,13 @@ const { getDesktopAccountUnread, reportDesktopRoomRead } = await import("../main
 test("account unread is read in one request and malformed rooms are dropped", async () => {
   calls.length = 0;
   answer = () => ({ rooms: [
-    { room_id: "github.com/org/repo", read_message_id: "msg_4", unread_count: 3, github_unread_count: 1 },
-    { room_id: "invite-room", read_message_id: null, unread_count: null, github_unread_count: null },
+    { room_id: "github.com/org/repo", read_message_id: "msg_4", unread_count: 3, github_unread_count: 1, mention_unread_count: 2 },
+    { room_id: "invite-room", read_message_id: null, unread_count: null, github_unread_count: null, mention_unread_count: null },
     { nope: true },
   ] });
   assert.deepEqual(await getDesktopAccountUnread(), { rooms: [
-    { roomId: "github.com/org/repo", readMessageId: "msg_4", unreadCount: 3, githubUnreadCount: 1 },
-    { roomId: "invite-room", readMessageId: null, unreadCount: null, githubUnreadCount: null },
+    { roomId: "github.com/org/repo", readMessageId: "msg_4", unreadCount: 3, githubUnreadCount: 1, mentionUnreadCount: 2 },
+    { roomId: "invite-room", readMessageId: null, unreadCount: null, githubUnreadCount: null, mentionUnreadCount: null },
   ] });
   assert.deepEqual(calls.map((call) => call.path), ["/account/unread"]);
 });

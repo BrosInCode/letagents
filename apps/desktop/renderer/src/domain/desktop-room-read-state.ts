@@ -3,6 +3,7 @@ import type {
   DesktopRoomMessage,
   DesktopRoomLatestMessage,
 } from "../../../electron/ipc-types";
+import { mentionsPerson } from "../../../../../shared/room-notification-preferences.mjs";
 import { normalizeRoomIdentifier } from "./sidebar-rooms";
 import { isGitHubRoomMessage, isLowSignalGitHubCheckMessage } from "../components/desktop/content/desktop-chat-message/github-event";
 
@@ -166,6 +167,8 @@ export interface RoomUnreadSnapshot {
   readMessageId: string;
   latestMessageId: string;
   count: number;
+  /** How many of the counted messages mention the account (`@login`). */
+  mentionCount?: number;
   githubEventsVisible?: boolean;
 }
 
@@ -182,6 +185,8 @@ export async function countUnreadRoomMessages(input: {
   latestMessageId: string;
   previous?: RoomUnreadSnapshot;
   ownSenderNames: readonly string[];
+  /** The account's login: a counted message that mentions it also counts in `mentionCount`; GitHub events never do, as on the server. */
+  mentionLogin?: string | null;
   githubEventsVisible?: boolean;
   loadPage(afterMessageId: string | null): Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
   isCurrent(): boolean;
@@ -190,7 +195,7 @@ export async function countUnreadRoomMessages(input: {
   const latestNumber = messageNumber(input.latestMessageId);
   if (readNumber < 0 || latestNumber < 0) return null;
   const githubEventsVisible = input.githubEventsVisible ?? false;
-  const result = { readMessageId: input.readMessageId, latestMessageId: input.latestMessageId, count: 0, githubEventsVisible };
+  const result = { readMessageId: input.readMessageId, latestMessageId: input.latestMessageId, count: 0, mentionCount: 0, githubEventsVisible };
   if (latestNumber <= readNumber) return result;
   const previous = input.previous?.readMessageId === input.readMessageId
     && (input.previous.githubEventsVisible ?? false) === githubEventsVisible
@@ -198,6 +203,7 @@ export async function countUnreadRoomMessages(input: {
   let cursor = previous?.latestMessageId || input.readMessageId;
   let cursorNumber = messageNumber(cursor);
   result.count = previous?.count || 0;
+  result.mentionCount = previous?.mentionCount || 0;
   const ownNames = new Set(input.ownSenderNames.map((name) => name.trim().toLowerCase()).filter(Boolean));
   while (cursorNumber < latestNumber) {
     if (!input.isCurrent()) return null;
@@ -216,7 +222,10 @@ export async function countUnreadRoomMessages(input: {
       const agentStatus = message.source === "agent" && /^\[status\]/i.test(message.text || "");
       const hiddenGitHubEvent = isLowSignalGitHubCheckMessage(message)
         || (!githubEventsVisible && isGitHubRoomMessage(message));
-      if (!ownMessage && !promptOnly && !agentStatus && !hiddenGitHubEvent) result.count += 1;
+      if (!ownMessage && !promptOnly && !agentStatus && !hiddenGitHubEvent) {
+        result.count += 1;
+        if (input.mentionLogin && !isGitHubRoomMessage(message) && mentionsPerson(message.text, input.mentionLogin)) result.mentionCount += 1;
+      }
     }
     if (!page.hasMore || page.messages.some((message) => messageNumber(message.id) >= latestNumber)) break;
     if (nextNumber <= cursorNumber) throw new Error("Unread message history did not advance.");

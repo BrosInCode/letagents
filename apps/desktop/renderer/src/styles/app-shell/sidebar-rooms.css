@@ -158,6 +158,15 @@
   line-height: 1;
 }
 
+/* An unread mention: the same badge, with "@" for the number and a soft ring,
+   so it reads as "someone wants you" rather than "new messages". */
+.room-unread-badge[data-mention] {
+  padding-bottom: 1px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sidebar-selection) 28%, transparent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 /* Child rooms hang from a hairline under their parent's icon. */
 .project-room-list {
   position: relative;

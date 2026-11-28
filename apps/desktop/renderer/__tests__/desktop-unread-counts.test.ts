@@ -147,7 +147,7 @@ test("room and app badges exclude hidden GitHub events and react to visibility c
 });
 
 /** A fake server: read points and counts per room, the reads it was sent, and how often it was asked. */
-function fakeServer(rooms: Record<string, { read: number | null; unread: number; github?: number; latest?: number }>) {
+function fakeServer(rooms: Record<string, { read: number | null; unread: number; github?: number; mentions?: number; latest?: number }>) {
   const reports: Array<[string, string, string | null]> = [];
   let gets = 0;
   const storage = new Map<string, string>();
@@ -160,7 +160,7 @@ function fakeServer(rooms: Record<string, { read: number | null; unread: number;
       getAccountUnread: async () => {
         gets += 1;
         return { rooms: Object.entries(rooms).map(([roomId, room]) => ({ roomId, readMessageId: room.read ? `msg_${room.read}` : null,
-          unreadCount: room.read ? room.unread : null, githubUnreadCount: room.read ? room.github ?? 0 : null })) };
+          unreadCount: room.read ? room.unread : null, githubUnreadCount: room.read ? room.github ?? 0 : null, mentionUnreadCount: room.read ? room.mentions ?? 0 : null })) };
       },
       reportRoomRead: async (id: string, messageId: string, from?: string | null) => {
         reports.push([id, messageId, from ?? null]);
@@ -775,4 +775,175 @@ test("the server count stays on screen while the local recount loads after the s
     assert.equal(counts.roomCounts.value["room-g"], 2);
     assert.ok(!seen.includes(0), `the badge never read 0 during the switch (saw ${seen.join(", ")})`);
   } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+const said = (id: number, text: string, extra: Record<string, unknown> = {}) =>
+  ({ id: `msg_${id}`, sender: "Ada", source: "browser", text, ...extra }) as DesktopRoomMessage;
+
+test("a server mention count reaches the room, and the room being read shows none", async () => {
+  const originalWindow = globalThis.window;
+  globalThis.window = { letagentsDesktop: { room: {
+    getMessagesAfter: async () => ({ messages: [], hasMore: false }),
+    getAccountUnread: async () => ({ rooms: [
+      { roomId: "room-a", readMessageId: "msg_10", unreadCount: 5, githubUnreadCount: 0, mentionUnreadCount: 2 },
+      { roomId: "room-b", readMessageId: "msg_10", unreadCount: 3, githubUnreadCount: 0, mentionUnreadCount: null },
+    ] }),
+    reportRoomRead: async () => {},
+  }, notifications: { setBadgeCount: async () => {} } } } as never;
+  const scope = effectScope();
+  const reading = ref<string | null>(null);
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms: ref([room("room-a", 15), room("room-b", 13)]), readMarkers: ref({}), storageMode: ref("cloud"),
+    readingRoom: () => reading.value,
+  }))!;
+  try {
+    assert.deepEqual(counts.roomMentionCounts.value, { "room-a": 0, "room-b": 0 }, "nothing shows before the server's first answer");
+    await settleDebounce();
+    assert.deepEqual(counts.roomCounts.value, { "room-a": 5, "room-b": 3 });
+    assert.deepEqual(counts.roomMentionCounts.value, { "room-a": 2, "room-b": 0 }, "an older server sends no mention count: none shows");
+    reading.value = "room-a"; await nextTick();
+    assert.equal(counts.roomMentionCounts.value["room-a"], 0, "the room on screen shows no mention count");
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a local room counts mentions over the messages it counts, and no others", async () => {
+  const originalWindow = globalThis.window;
+  globalThis.window = { letagentsDesktop: {
+    room: { getMessagesAfter: async () => ({ messages: [
+      said(2, "hi @emmy, can you look?"),
+      said(3, "no mention here, mail me@emmy.example"),
+      said(4, "mine: @Emmy", { sender: "Emmy" }),
+      { id: "msg_5", sender: "Worker", source: "agent", text: "[status] waiting on @Emmy" } as DesktopRoomMessage,
+      { id: "msg_6", sender: "Worker", source: "agent", text: "done, @EMMY" } as DesktopRoomMessage,
+    ], hasMore: false }) },
+    notifications: { setBadgeCount: async () => {} },
+  } } as never;
+  const scope = effectScope();
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms: ref([room("local-a", 6)]), readMarkers: ref({ "local-a": "msg_1" }), storageMode: ref("local"),
+    historyMode: () => "local",
+  }))!;
+  try {
+    await counts.refresh(); await nextTick();
+    assert.equal(counts.roomCounts.value["local-a"], 3, "the person's own message and the [status] post are not counted");
+    assert.equal(counts.roomMentionCounts.value["local-a"], 2);
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a room the server gives no count for counts mentions from its read point, and keeps the last server value until then", async () => {
+  const originalWindow = globalThis.window;
+  let allowed = true;
+  let release: (() => void) | null = null;
+  globalThis.window = { letagentsDesktop: { room: {
+    getMessagesAfter: async () => {
+      if (!allowed) await new Promise<void>((resolve) => { release = resolve; });
+      return { messages: [said(11, "ping @emmy"), said(12, "nothing")], hasMore: false };
+    },
+    getAccountUnread: async () => ({ rooms: [allowed
+      ? { roomId: "room-g", readMessageId: "msg_10", unreadCount: 2, githubUnreadCount: 0, mentionUnreadCount: 1 }
+      : { roomId: "room-g", readMessageId: null, unreadCount: null, githubUnreadCount: null, mentionUnreadCount: null }] }),
+    reportRoomRead: async () => {},
+  }, notifications: { setBadgeCount: async () => {} } } } as never;
+  const scope = effectScope();
+  const readRevision = ref(0);
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms: ref([room("room-g", 12)]), readMarkers: ref({ "room-g": "msg_4" }), storageMode: ref("cloud"),
+    readRevision: () => readRevision.value, takeReads: () => [null],
+  }))!;
+  const seen: number[] = [];
+  try {
+    await settleDebounce();
+    assert.equal(counts.roomMentionCounts.value["room-g"], 1, "the server's mention count");
+    scope.run(() => watch(() => counts.roomMentionCounts.value["room-g"], (value) => { seen.push(value ?? -1); }, { flush: "sync" }));
+    allowed = false; readRevision.value += 1; await nextTick(); await settleDebounce();
+    assert.equal(counts.roomMentionCounts.value["room-g"], 1, "while the recount loads, the last server mention count stays");
+    assert.ok(!seen.includes(0), `the mention count never read 0 during the switch (saw ${seen.join(", ")})`);
+    (release as (() => void) | null)?.();
+    await counts.refresh(); await nextTick();
+    assert.equal(counts.roomCounts.value["room-g"], 2);
+    assert.equal(counts.roomMentionCounts.value["room-g"], 1, "the local count from the read point finds the same mention");
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a read to the end clears the mention count, here and once reported", async () => {
+  const originalWindow = globalThis.window;
+  const fake = fakeServer({ "room-r": { read: 2, unread: 7, mentions: 3 }, "room-e": { read: 2, unread: 7, mentions: 3 } });
+  globalThis.window = fake.window as never;
+  const scope = effectScope();
+  const confirmedReads = ref<Record<string, string>>({});
+  const counts = scope.run(() => useDesktopUnreadCounts({ account: ref(accountA), rooms: ref([room("room-r", 9), room("room-e", 9)]),
+    readMarkers: ref({}), storageMode: ref("cloud"), confirmedReads }))!;
+  try {
+    await settleDebounce(); await counts.refresh(); await nextTick();
+    assert.deepEqual(counts.roomMentionCounts.value, { "room-r": 3, "room-e": 3 });
+    // Seen to the end here, not yet on the server: nothing is unread.
+    confirmedReads.value = { "room-r": "msg_9", "room-e": "msg_9" };
+    await nextTick();
+    assert.deepEqual(counts.roomMentionCounts.value, { "room-r": 0, "room-e": 0 }, "read here: no mention count");
+    // Reported to the end: the entry itself holds 0 even once the proof is gone.
+    await settleDebounce(); await counts.refresh(); await nextTick();
+    assert.equal(fake.reports.length, 2);
+    confirmedReads.value = {}; await nextTick();
+    assert.deepEqual(counts.roomCounts.value, { "room-r": 0, "room-e": 0 });
+    assert.deepEqual(counts.roomMentionCounts.value, { "room-r": 0, "room-e": 0 }, "reported to the end: the server entry shows no mentions");
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a marker kept before this version lowers the mention count with the count", async () => {
+  const originalWindow = globalThis.window;
+  const fake = fakeServer({ "room-l": { read: 2, unread: 7, mentions: 5 } });
+  globalThis.window = fake.window as never;
+  const scope = effectScope();
+  const counts = scope.run(() => useDesktopUnreadCounts({ account: ref(accountA), rooms: ref([room("room-l", 9)]),
+    readMarkers: ref({ "room-l": "msg_9" }), storageMode: ref("cloud"), confirmedReads: ref({}),
+    legacyReadMarkers: () => ({ "room-l": "msg_8" }) }))!;
+  try {
+    await settleDebounce(); await counts.refresh(); await nextTick();
+    assert.equal(counts.roomCounts.value["room-l"], 1);
+    assert.equal(counts.roomMentionCounts.value["room-l"], 0, "the saved marker found no mention after msg_8: the lower of 5 and 0");
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a recount after new messages keeps the mentions already counted", async () => {
+  const originalWindow = globalThis.window;
+  let latest = 3;
+  globalThis.window = { letagentsDesktop: {
+    room: { getMessagesAfter: async (_id: string, after: string | null) => ({
+      messages: [said(2, "ping @emmy"), said(3, "hello"), said(4, "more talk")].filter((m) => Number(m.id.slice(4)) > Number(after!.slice(4)) && Number(m.id.slice(4)) <= latest),
+      hasMore: false }) },
+    notifications: { setBadgeCount: async () => {} },
+  } } as never;
+  const scope = effectScope();
+  const rooms = ref([room("local-a", 3)]);
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms, readMarkers: ref({ "local-a": "msg_1" }), storageMode: ref("local"), historyMode: () => "local",
+  }))!;
+  try {
+    await counts.refresh(); await nextTick();
+    assert.deepEqual([counts.roomCounts.value["local-a"], counts.roomMentionCounts.value["local-a"]], [2, 1]);
+    latest = 4; rooms.value = [room("local-a", 4)]; await nextTick(); await counts.refresh(); await nextTick();
+    assert.deepEqual([counts.roomCounts.value["local-a"], counts.roomMentionCounts.value["local-a"]], [3, 1], "a new message without a mention keeps the mention");
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a mention inside a GitHub event is not counted, as on the server, even when GitHub events show", async () => {
+  const originalWindow = globalThis.window;
+  const storage = new Map<string, string>();
+  globalThis.window = { localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) }, letagentsDesktop: {
+    room: { getMessagesAfter: async () => ({ messages: [
+      said(2, "Ada commented on PR #12 in org/repo: \"@emmy can you check?\" https://github.com/org/repo/pull/12", { source: "github", sender: "github" }),
+      said(3, "ping @emmy"),
+    ], hasMore: false }) },
+    notifications: { setBadgeCount: async () => {} },
+  } } as never;
+  const scope = effectScope();
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms: ref([room("local-g", 3)]), readMarkers: ref({ "local-g": "msg_1" }), storageMode: ref("local"), historyMode: () => "local",
+  }))!;
+  try {
+    rememberGitHubEventsVisible("local-g", true);
+    await nextTick(); await counts.refresh(); await nextTick();
+    assert.equal(counts.roomCounts.value["local-g"], 2, "the event is shown, so it is unread");
+    assert.equal(counts.roomMentionCounts.value["local-g"], 1, "but only the person's message mentions");
+  } finally { rememberGitHubEventsVisible("local-g", false); scope.stop(); globalThis.window = originalWindow; }
 });
