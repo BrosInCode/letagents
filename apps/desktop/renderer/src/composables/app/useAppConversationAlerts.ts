@@ -1,7 +1,11 @@
 import { onScopeDispose, ref, watch } from "vue";
 import type { DesktopNotificationStatus } from "../../../../electron/ipc-types";
 import { conversationAlertText, type IncomingConversationMessage } from "../../../../../../shared/conversation-alerts.mjs";
-import { readNotificationsEnabled, readSoundEnabled } from "../../components/desktop/content/room-shell/preferences";
+import {
+  notificationsPreferenceRevision,
+  readNotificationsEnabled,
+  readSoundEnabled,
+} from "../../components/desktop/content/room-shell/preferences";
 import { playRoomInteractionSound } from "../../components/desktop/content/room-shell/roomSounds";
 import { activateFallbackRoomNotification } from "../../domain/room-message-alert-gate";
 import { desktopIpc } from "../../ipc/index.js";
@@ -21,7 +25,14 @@ export function useAppConversationAlerts(context: unknown) {
   let sessionVersion = 0;
   watch(() => authStatus.value?.account?.id, () => { sessionVersion += 1; }, { flush: "sync" });
 
+  let ipcStatusLoaded = false;
+  // Until the main process answers, follow the switch the room settings save.
+  watch(notificationsPreferenceRevision, () => {
+    if (!ipcStatusLoaded) notificationsEnabled.value = readNotificationsEnabled();
+  }, { flush: "sync" });
+
   function applyNotificationStatus(status: DesktopNotificationStatus): void {
+    ipcStatusLoaded = true;
     notificationsEnabled.value = status.enabled;
     nativeNotificationsActive.value = status.nativeRegistered;
   }

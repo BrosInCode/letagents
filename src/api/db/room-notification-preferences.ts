@@ -10,7 +10,9 @@ function toPreference(row: StoredPreference): RoomNotificationPreferenceEntry {
 export async function getRoomNotificationPreference(accountId: string, roomId: string): Promise<RoomNotificationPreferenceEntry> {
   const result = await pool.query<StoredPreference>(`SELECT room_id, level, snoozed_until
     FROM account_room_notification_preferences WHERE account_id=$1 AND room_id=$2`, [accountId, roomId]);
-  return result.rows[0] ? toPreference(result.rows[0]) : { room_id: roomId, ...DEFAULT_ROOM_NOTIFICATION_PREFERENCE };
+  return result.rows[0]
+    ? toPreference(result.rows[0])
+    : { room_id: roomId, ...DEFAULT_ROOM_NOTIFICATION_PREFERENCE, saved: false };
 }
 
 /**

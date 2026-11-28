@@ -348,7 +348,7 @@ test('muting and snoozing suppress only that account and room; expiry restores t
 
 test('a room with no saved level pushes only a mention of the account; a snooze alone keeps that default', runOptions, async () => {
   const f = await notificationFixture({ savedLevel: null });
-  assert.deepEqual(await preferenceStore!.getRoomNotificationPreference(f.person.id, f.a.roomId), { room_id: f.a.roomId, level: 'mentions', snoozed_until: null });
+  assert.deepEqual(await preferenceStore!.getRoomNotificationPreference(f.person.id, f.a.roomId), { room_id: f.a.roomId, level: 'mentions', snoozed_until: null, saved: false });
   assert.deepEqual((await f.send('plain message')).devices, []);
   assert.deepEqual((await f.send('@person-login please look')).devices, [f.a.deviceId]);
   assert.deepEqual((await f.send('@person-login @other-login both')).devices, f.both);

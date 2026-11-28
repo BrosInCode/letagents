@@ -4,9 +4,12 @@ import { useAuth } from '../useAuth';
 import { apiFetch, roomPath } from './api';
 import { room } from './state';
 
+// The web cannot set a level, so a room the person never set (and a signed-out
+// viewer's room) keeps the chime for every message. The desktop alerts for
+// mentions only there.
 export const roomNotificationPreferences = createRoomNotificationClient({
   get: (id) => apiFetch(`${roomPath(id)}/notification-preferences`),
-});
+}, undefined, undefined, { defaultLevel: 'all' });
 
 // useRoom owns one shared stream for the page; register the focus listener only
 // while a room is open and remove it when that room or the account changes.
