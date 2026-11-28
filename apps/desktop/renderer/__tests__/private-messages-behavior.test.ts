@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parse, compileScript } from "@vue/compiler-sfc";
 import ts from "typescript";
@@ -38,7 +39,9 @@ const component = Function(
         }
       : id.endsWith(".vue")
         ? {}
-        : require(id),
+        : id.startsWith("../")
+          ? require(fileURLToPath(new URL(id, new URL("../../../../shared/ui/", import.meta.url))))
+          : require(id),
   {},
 );
 const message = (number: number, clientId = `client-${number}`) => ({
@@ -61,7 +64,10 @@ const chat = {
   last_message: message(12),
   updated_at: "2026-09-20T12:00:00Z",
 };
-function setup(api: Record<string, unknown>) {
+function setup(
+  api: Record<string, unknown>,
+  emit: (event: string, value: unknown) => void = () => {},
+) {
   cleanup = [];
   const props = Vue.reactive({
     api,
@@ -70,7 +76,7 @@ function setup(api: Record<string, unknown>) {
     openConversationId: null as string | null,
     openConversationNonce: 0,
   });
-  const vm = component.setup(props, { expose() {}, emit() {} });
+  const vm = component.setup(props, { expose() {}, emit });
   vm.testProps = props;
   const callbacks = cleanup;
   vm.stop = () => callbacks.forEach((fn) => fn());
@@ -300,4 +306,48 @@ test("a repeated notification reopens its conversation after the person navigate
   vm.testProps.openConversationNonce++;
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(vm.selectedId.value, "chat");
+});
+
+test("a new private message from someone else emits incoming once, and only when its conversation is not open in front", async (t) => {
+  const original = globalThis.document;
+  let focused = false;
+  Object.assign(globalThis, {
+    document: { hasFocus: () => focused, visibilityState: "visible" },
+  });
+  t.after(() => Object.assign(globalThis, { document: original }));
+  // message(11) is from "other"; message(12) is the viewer's own.
+  let conversations = [{ ...chat, unread_count: 1, last_message: message(11) }];
+  const incoming: { conversation: { id: string }; message: { number: number } }[] = [];
+  const vm = setup(
+    {
+      list: async () => ({ conversations, version: String(conversations.length) }),
+      messages: async () => ({ messages: [], has_more: false }),
+      update: async () => undefined,
+    },
+    (event, value) => {
+      if (event === "incoming") incoming.push(value as (typeof incoming)[number]);
+    },
+  );
+  // The first list holds messages from before the app was watching.
+  await vm.refresh();
+  assert.deepEqual(incoming, []);
+  // The viewer's own newer message, then a new one from someone else.
+  conversations = [{ ...chat, unread_count: 0, last_message: message(12) }];
+  await vm.refresh();
+  assert.deepEqual(incoming, []);
+  conversations = [{ ...chat, unread_count: 1, last_message: message(13) }];
+  await vm.refresh();
+  await vm.refresh();
+  assert.deepEqual(incoming.map((item) => [item.conversation.id, item.message.number]), [["chat", 13]]);
+  // Open and in front: the person sees it, so nothing is emitted.
+  vm.selectedId.value = "chat";
+  focused = true;
+  conversations = [{ ...chat, unread_count: 1, last_message: message(14) }];
+  await vm.refresh();
+  assert.equal(incoming.length, 1);
+  // A muted conversation never alerts.
+  focused = false;
+  conversations = [{ ...chat, muted: true, unread_count: 1, last_message: message(15) }];
+  await vm.refresh();
+  assert.equal(incoming.length, 1);
 });

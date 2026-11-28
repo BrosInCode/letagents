@@ -66,6 +66,8 @@ test("a muted room suppresses ordinary alerts but still delivers personal remind
   for (const accountId of [input.accountId, other.id]) {
     await pool!.query(`INSERT INTO account_room_recents (account_id,room_id,first_opened_at,last_opened_at,updated_at)
       VALUES ($1,$2,now(),now(),now())`, [accountId, input.roomId]);
+    // Both chose All messages, so an ordinary message alerts until the mute.
+    await preferences!.setRoomNotificationPreference(accountId, input.roomId, { level: "all" });
   }
   await core!.addMessage(input.roomId, "Sender", "Before mute", { source: "human" });
   assert.deepEqual((await rows("desktop_push_notifications")).map(row => row.device_id).sort(),

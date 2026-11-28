@@ -1,7 +1,14 @@
 import { allowsRoomNotification, DEFAULT_ROOM_NOTIFICATION_PREFERENCE } from './room-notification-preferences.mjs';
 
-/** Personal cache shared by desktop and the read-only web sound gate. */
-export function createRoomNotificationClient(api, changed = () => {}, normalizeKey = (id) => id) {
+/**
+ * Personal cache shared by desktop and the read-only web sound gate.
+ * `defaultLevel` is the level of a room the person never set (and of every
+ * room before a read answers or when it fails): the desktop alerts for
+ * mentions only, while the web, which cannot set a level, keeps its chime for
+ * all messages.
+ */
+export function createRoomNotificationClient(api, changed = () => {}, normalizeKey = (id) => id, { defaultLevel = DEFAULT_ROOM_NOTIFICATION_PREFERENCE.level } = {}) {
+  const fallback = () => ({ ...DEFAULT_ROOM_NOTIFICATION_PREFERENCE, level: defaultLevel });
   let viewer = null;
   let epoch = 0;
   let listVersion = 0;
@@ -12,7 +19,7 @@ export function createRoomNotificationClient(api, changed = () => {}, normalizeK
   function state(roomId) {
     roomId = normalizeKey(roomId);
     if (!rooms.has(roomId)) rooms.set(roomId, {
-      preference: { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCE }, ready: false, loading: false,
+      preference: fallback(), ready: false, loading: false,
       busy: false, error: '', version: 0,
     });
     return rooms.get(roomId);
@@ -39,11 +46,13 @@ export function createRoomNotificationClient(api, changed = () => {}, normalizeK
     try {
       const preference = await api.get(roomId);
       if (epoch !== currentEpoch || row.version !== version) return;
-      row.preference = preference;
+      row.preference = preference?.saved === false
+        ? { ...fallback(), snoozed_until: preference.snoozed_until ?? null }
+        : preference;
       row.error = '';
     } catch (error) {
       if (epoch !== currentEpoch || row.version !== version) return;
-      if (!row.ready) row.preference = { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCE };
+      if (!row.ready) row.preference = fallback();
       row.error = error instanceof Error ? error.message : 'Notification settings could not be loaded.';
     } finally {
       if (epoch === currentEpoch && row.version === version) {
@@ -74,7 +83,7 @@ export function createRoomNotificationClient(api, changed = () => {}, normalizeK
         const row = state(id);
         if (row.version !== (roomVersions.get(id) ?? 0) || row.loading || row.busy) continue;
         if (!entries.has(id) && result.truncated) continue;
-        row.preference = entries.get(id) ?? { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCE };
+        row.preference = entries.get(id) ?? fallback();
         row.ready = true;
         row.error = '';
       }
@@ -82,7 +91,7 @@ export function createRoomNotificationClient(api, changed = () => {}, normalizeK
       if (currentEpoch !== epoch || version !== listVersion) return;
       for (const [id, row] of rooms) {
         if (row.version !== (roomVersions.get(id) ?? 0) || row.loading || row.busy) continue;
-        if (!row.ready) row.preference = { ...DEFAULT_ROOM_NOTIFICATION_PREFERENCE };
+        if (!row.ready) row.preference = fallback();
         row.ready = true;
         row.error = error instanceof Error ? error.message : 'Notification settings could not be loaded.';
       }
@@ -124,7 +133,7 @@ export function createRoomNotificationClient(api, changed = () => {}, normalizeK
   function allows(roomId, text, now = Date.now()) {
     const row = state(roomId);
     if ((row.loading || listLoading) && !row.ready) return false;
-    return allowsRoomNotification(row.preference, text, viewer?.login, now);
+    return allowsRoomNotification(row.preference ?? fallback(), text, viewer?.login, now);
   }
   async function allowsAfterRead(roomId, text) {
     roomId = normalizeKey(roomId);

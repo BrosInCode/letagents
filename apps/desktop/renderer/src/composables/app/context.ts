@@ -19,6 +19,7 @@ import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } fro
 import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
 import type { useAppLifecycle } from "./useAppLifecycle";
 import type { useAppJoinRequestAlerts } from "./useAppJoinRequestAlerts";
+import type { useAppConversationAlerts } from "./useAppConversationAlerts";
 import type { useAppMessageNotifications } from "./useAppMessageNotifications";
 import type { useAppCompany, useAppCompanyNavigation } from "./useAppCompany";
 
@@ -61,6 +62,7 @@ interface AppContextParts {
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
   useAppLifecycle: ReturnType<typeof useAppLifecycle>;
   useAppJoinRequestAlerts: ReturnType<typeof useAppJoinRequestAlerts>;
+  useAppConversationAlerts: ReturnType<typeof useAppConversationAlerts>;
   useAppMessageNotifications: ReturnType<typeof useAppMessageNotifications>;
 }
 

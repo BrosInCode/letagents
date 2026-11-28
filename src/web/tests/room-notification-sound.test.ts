@@ -67,6 +67,7 @@ test('web reads on open/focus and gates existing sound while message delivery st
     room.value = { identifier: 'room-b' } as any; await settle(); assert.equal(reads.at(-1), '/rooms/room-b/notification-preferences');
     preference = new Error('offline');
     room.value = { identifier: 'room-c' } as any; await settle();
+    // The web's default is All messages: a failed first read fails open.
     assert.equal(roomNotificationPreferences.allows('room-c', 'first read fails open'), true);
   } finally { stream.stop(); room.value = null; await settle(); soundEnabled.value = false; }
   assert.equal(events.get('focus')?.size, 0);

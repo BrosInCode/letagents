@@ -10,12 +10,16 @@ export function readSoundEnabled(): boolean {
 
 export const notificationsPreferenceRevision = ref(0);
 
+/**
+ * The app's last known "Desktop notifications" switch, used until the main
+ * process answers. Notifications are on until the person turns them off.
+ */
 export function readNotificationsEnabled(): boolean {
   void notificationsPreferenceRevision.value;
   try {
-    return window.localStorage.getItem("letagents-desktop:notifications") === "on";
+    return window.localStorage.getItem("letagents-desktop:notifications") !== "off";
   } catch {
-    return false;
+    return true;
   }
 }
 

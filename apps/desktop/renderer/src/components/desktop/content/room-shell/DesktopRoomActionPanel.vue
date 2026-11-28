@@ -630,9 +630,10 @@ function moveStorageSelection(event: KeyboardEvent): void {
 
 const notificationDescription = computed(() => {
   if (props.notificationPermission === "unsupported") return "Desktop alerts are unavailable in this environment.";
-  if (props.notificationsEnabled) return "Desktop alerts are enabled for every joined room.";
+  // Each room's level decides which of its messages alert; private messages always do.
+  if (props.notificationsEnabled) return "Alerts for mentions, private messages, and rooms set to All messages.";
   if (props.notificationPermission === "denied") return "Notifications are blocked by the system permission.";
-  return "Turn on desktop alerts for all joined rooms.";
+  return "Turn on desktop alerts for mentions and private messages.";
 });
 
 const githubDotState = computed(() => {

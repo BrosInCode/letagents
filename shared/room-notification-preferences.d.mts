@@ -3,7 +3,11 @@ export interface RoomNotificationPreference {
   level: RoomNotificationLevel;
   snoozed_until: string | null;
 }
-export interface RoomNotificationPreferenceEntry extends RoomNotificationPreference { room_id: string }
+export interface RoomNotificationPreferenceEntry extends RoomNotificationPreference {
+  room_id: string;
+  /** False when the person never set this room: the level is the server's default, and a client may use its own. */
+  saved?: false;
+}
 export interface RoomNotificationPreferenceList { preferences: RoomNotificationPreferenceEntry[]; truncated: boolean }
 export type RoomNotificationPreferenceChange = Partial<RoomNotificationPreference>;
 export type RoomNotificationSnoozePreset = '1h' | '8h' | 'tomorrow';

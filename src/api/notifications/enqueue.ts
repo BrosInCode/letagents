@@ -1,5 +1,9 @@
 import { sql } from "drizzle-orm";
-import { PERSON_MENTION_START, PERSON_MENTION_END } from "../../../shared/room-notification-preferences.mjs";
+import {
+  DEFAULT_ROOM_NOTIFICATION_PREFERENCE,
+  PERSON_MENTION_END,
+  PERSON_MENTION_START,
+} from "../../../shared/room-notification-preferences.mjs";
 
 import type { MessageCreateTransaction } from "../db/messages/create.js";
 import type { MessageRow } from "../db/types.js";
@@ -76,7 +80,8 @@ export async function enqueueDesktopPushNotifications(
     WHERE device.enabled = TRUE
       AND (${message.publisher_account_id}::text IS NULL OR device.account_id <> ${message.publisher_account_id})
       AND (preference.snoozed_until IS NULL OR preference.snoozed_until <= statement_timestamp())
-      AND CASE COALESCE(preference.level, 'all')
+      -- No saved level: the default (mentions only).
+      AND CASE COALESCE(preference.level, ${DEFAULT_ROOM_NOTIFICATION_PREFERENCE.level}::text)
         WHEN 'all' THEN TRUE
         WHEN 'mentions' THEN ${message.text} ~* (
           ${PERSON_MENTION_START} || REGEXP_REPLACE(account.login, '([^A-Za-z0-9_-])', ${String.raw`\\\1`}, 'g') || ${PERSON_MENTION_END}

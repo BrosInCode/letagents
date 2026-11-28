@@ -6,7 +6,10 @@ export declare function createRoomNotificationClient(api: {
   get(roomId: string): Promise<RoomNotificationPreferenceEntry>;
   list?(): Promise<RoomNotificationPreferenceList>;
   put?(roomId: string, change: RoomNotificationPreferenceChange): Promise<RoomNotificationPreferenceEntry>;
-}, changed?: () => void, normalizeKey?: (roomId: string) => string): {
+}, changed?: () => void, normalizeKey?: (roomId: string) => string, options?: {
+  /** The level of a room the person never set; the shared default (mentions only) when omitted. */
+  defaultLevel?: RoomNotificationPreference['level'];
+}): {
   setViewer(viewer: { id: string; login: string } | null): void;
   signedIn(): boolean;
   viewerId(): string | null;

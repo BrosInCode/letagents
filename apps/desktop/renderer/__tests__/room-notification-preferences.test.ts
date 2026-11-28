@@ -39,18 +39,48 @@ test('snooze expiry restores the chosen level and tomorrow uses local calendar t
   } finally { if (old === undefined) delete process.env.TZ; else process.env.TZ = old; }
 });
 
-test('initial read holds an alert, and a failed read releases it as All messages', async () => {
+test('initial read holds an alert, and a failed read releases it at the default level (mentions only)', async () => {
   const read = deferred();
   const client = createRoomNotificationClient({ get: () => read.promise });
   client.setViewer({ id: 'a', login: 'ada' });
   const pending = client.refresh('r');
-  assert.equal(client.allows('r', 'hello'), false);
+  assert.equal(client.allows('r', '@ada hello'), false);
   let finished = false;
-  const decision = client.allowsAfterRead('r', 'hello').then(value => { finished = true; return value; });
+  const decision = client.allowsAfterRead('r', '@ada hello').then(value => { finished = true; return value; });
+  const plain = client.allowsAfterRead('r', 'hello');
   await tick(); assert.equal(finished, false);
   read.reject(new Error('offline')); await pending;
   assert.equal(await decision, true);
+  assert.equal(await plain, false);
+  assert.equal(client.state('r').preference.level, 'mentions');
   assert.match(client.state('r').error, /offline/);
+});
+
+test('a room the person never set takes each client\'s own default: mentions on the desktop, all messages on the web', async () => {
+  const unsaved = { room_id: 'r', level: 'mentions' as const, snoozed_until: null, saved: false as const };
+  const desktop = createRoomNotificationClient({ get: async () => unsaved });
+  const web = createRoomNotificationClient({ get: async () => unsaved }, undefined, undefined, { defaultLevel: 'all' });
+  for (const client of [desktop, web]) { client.setViewer({ id: 'a', login: 'ada' }); await client.refresh('r'); }
+  assert.equal(desktop.state('r').preference.level, 'mentions');
+  assert.equal(desktop.allows('r', 'hello'), false);
+  assert.equal(desktop.allows('r', '@ada hello'), true);
+  assert.equal(web.state('r').preference.level, 'all');
+  assert.equal(web.allows('r', 'hello'), true);
+  // A saved level is the same for both.
+  const saved = { room_id: 'r', level: 'mentions' as const, snoozed_until: null };
+  const webSaved = createRoomNotificationClient({ get: async () => saved }, undefined, undefined, { defaultLevel: 'all' });
+  webSaved.setViewer({ id: 'a', login: 'ada' }); await webSaved.refresh('r');
+  assert.equal(webSaved.allows('r', 'hello'), false);
+  // A signed-out web viewer has no saved levels: the chime plays for every message.
+  const signedOut = createRoomNotificationClient({ get: async () => saved }, undefined, undefined, { defaultLevel: 'all' });
+  assert.equal(signedOut.allows('r', 'hello room'), true);
+  assert.equal(createRoomNotificationClient({ get: async () => saved }).allows('r', 'hello room'), false);
+});
+
+test('a room with no saved level alerts only for a mention of the viewer', () => {
+  assert.equal(allowsRoomNotification(undefined, 'hello', 'ada'), false);
+  assert.equal(allowsRoomNotification(undefined, 'hi @Ada', 'ada'), true);
+  assert.equal(allowsRoomNotification({ level: 'all', snoozed_until: null }, 'hello', 'ada'), true);
 });
 
 test('account switches discard reads, bulk responses, writes and held alerts from the previous person', async () => {
@@ -65,8 +95,9 @@ test('account switches discard reads, bulk responses, writes and held alerts fro
   read.resolve(muted); list.resolve({ preferences: [muted], truncated: false }); write.resolve(muted);
   await Promise.all([pending, bulk, mutation]);
   assert.equal(await held, false);
-  assert.equal(client.allows('r', 'hello'), true);
-  assert.equal(client.state('r').preference.level, 'all');
+  assert.equal(client.allows('r', '@bea hello'), true);
+  assert.equal(client.allows('r', 'hello'), false);
+  assert.equal(client.state('r').preference.level, 'mentions');
 });
 
 test('newer reads and writes survive stale responses; failed refreshes retain known settings', async () => {
@@ -83,6 +114,7 @@ test('newer reads and writes survive stale responses; failed refreshes retain kn
   assert.equal(client.allows('r', 'hello'), false);
   const failed = client.refresh('r'); reads[2].reject(new Error('offline')); await failed;
   assert.equal(client.allows('r', 'hello'), false);
+  assert.equal(client.state('r').preference.level, 'muted', 'a failed read keeps the known level');
   assert.match(client.state('r').error, /offline/);
 });
 
@@ -92,13 +124,16 @@ test('focus bulk refresh resets missing defaults, respects truncation and retain
   client.setViewer({ id: 'a', login: 'ada' });
   await client.refreshAll(); assert.equal(client.allows('r', 'hello'), false);
   result = { preferences: [], truncated: true }; await client.refreshAll(); assert.equal(client.allows('r', 'hello'), false);
-  result = { preferences: [], truncated: false }; await client.refreshAll(); assert.equal(client.allows('r', 'hello'), true);
+  assert.equal(client.state('r').preference.level, 'muted', 'a truncated list keeps a room it does not include');
+  result = { preferences: [], truncated: false }; await client.refreshAll(); assert.equal(client.allows('r', '@ada hello'), true);
+  assert.equal(client.allows('r', 'hello'), false);
   await client.refresh('r');
   client.state('unknown');
   result = new Error('offline'); await client.refreshAll();
   assert.equal(client.allows('r', 'hello'), false);
+  assert.equal(client.state('r').preference.level, 'muted', 'a failed list keeps the known level');
   assert.match(client.state('r').error, /offline/);
-  assert.equal(client.allows('unknown', 'hello'), true);
+  assert.equal(client.allows('unknown', '@ada hello'), true);
   assert.match(client.state('unknown').error, /offline/);
 });
 
@@ -133,7 +168,7 @@ test('the real watcher holds alerts through replacement single and bulk reads, i
     scope.run(() => watchRoomNotifications({ visibleMessages: messages, ownMessageIds: new Set(), playRoomSound: kind => sounds.push(kind), showRoomNotification: m => alerts.push(m.id), shouldNotify: m => client.allowsAfterRead('r', m.text) }));
     try {
       messages.value = [{ id: 'history', text: 'history' }]; await tick();
-      messages.value = [...messages.value, { id: 'incoming', text: 'hello' }]; await tick();
+      messages.value = [...messages.value, { id: 'incoming', text: '@ada hello' }]; await tick();
       const second = refresh();
       reads[0].resolve(bulk ? { preferences: [], truncated: false } : all); await first; await tick();
       assert.deepEqual(alerts, []); assert.deepEqual(sounds, []);

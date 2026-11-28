@@ -503,6 +503,10 @@ import type {
   ConversationMessage,
   ConversationPerson,
 } from "../conversation-contracts.mjs";
+import {
+  newIncomingConversationMessages,
+  type IncomingConversationMessage,
+} from "../conversation-alerts.mjs";
 import ChatIcon from "./ConversationIcon.vue";
 
 const props = withDefaults(
@@ -515,7 +519,11 @@ const props = withDefaults(
   }>(),
   { active: true, openConversationId: null, openConversationNonce: 0 },
 );
-const emit = defineEmits<{ unread: [count: number] }>();
+const emit = defineEmits<{
+  unread: [count: number];
+  /** A new private message from someone else that the person is not looking at; the app decides how to alert. */
+  incoming: [incoming: IncomingConversationMessage];
+}>();
 const chats = ref<Conversation[]>([]),
   selectedId = ref<string | null>(null),
   messages = ref<ConversationMessage[]>([]);
@@ -548,6 +556,8 @@ const outbox = ref<
     { text: string; id: string; failed: boolean; acknowledgedNumber?: number }
   >
 >({});
+// The last list the alerts compared against; null until the first list loads.
+let alertedList: Conversation[] | null = null;
 let alive = true,
   version = "0",
   refreshGeneration = 0,
@@ -621,8 +631,13 @@ async function refresh() {
   try {
     const result = await props.api.list();
     if (!alive || generation !== refreshGeneration) return;
+    const incoming = newIncomingConversationMessages(alertedList, result.conversations, props.accountId);
+    alertedList = result.conversations;
     chats.value = result.conversations;
     version = result.version;
+    for (const item of incoming) {
+      if (!isOpenInFront(item.conversation.id)) emit("incoming", item);
+    }
     connectionError.value = "";
     emit(
       "unread",
@@ -637,6 +652,14 @@ async function refresh() {
   } finally {
     if (alive) loading.value = false;
   }
+}
+function isOpenInFront(id: string) {
+  return (
+    props.active &&
+    selectedId.value === id &&
+    document.visibilityState === "visible" &&
+    document.hasFocus()
+  );
 }
 async function watchChanges() {
   let failures = 0;

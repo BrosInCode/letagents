@@ -176,6 +176,7 @@ export async function setDesktopNotificationsEnabled(enabled: boolean): Promise<
   await initializeDesktopNotifications();
   const current = await readState();
   current.enabled = enabled;
+  current.enabledChosen = true;
   current.lastError = null;
   await persistState();
   if (enabled) {
