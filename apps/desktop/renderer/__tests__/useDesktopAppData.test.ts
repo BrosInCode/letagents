@@ -1736,10 +1736,11 @@ describe("useDesktopAppData root room refresh", () => {
       return again;
     };
     await withDesktopBridge(harness.windowBridge, async () => {
-      // Offline: the list answer is empty, so nothing is read again.
-      harness.nextAccountRooms = [];
-      await harness.state.refreshAccountRooms();
+      // Offline: the answer holds only this device's rooms, so nothing is read again, tick after tick.
+      harness.nextAccountRooms = [accountRoomEntry("local_5c489963", { source: "local" })];
+      for (let tick = 0; tick < 3; tick += 1) await harness.state.refreshAccountRooms();
       assert.equal(harness.getSnapshotRequests.length, 0);
+      assert.equal(harness.listAccountRoomsCalls.length, 3, "one list call per tick, no full refresh");
       // The network is back and the list answers: the waiting room is read again.
       online = true;
       harness.nextAccountRooms = [accountRoomEntry(id, { displayName: "fern-river" })];

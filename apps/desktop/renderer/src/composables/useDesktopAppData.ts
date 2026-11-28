@@ -589,8 +589,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       allAccountRooms.filter((room) => !room.archived),
     );
     // A room read while the list was unknown shows "waiting for your room list".
-    // The list is here, so read that room once more (once per list answer).
-    if (!allAccountRooms.length) return;
+    // A server list is here, so read that room once more (once per list answer).
+    // Offline, the answer holds only this device's rooms (`source: "local"`): the server list is still unknown.
+    if (!allAccountRooms.some((room) => room.source !== "local")) return;
     const waiting = (snapshot: DesktopRoomSnapshot | null) => Boolean(snapshot
       && snapshot.access.status === "unavailable" && !snapshot.access.httpStatus
       && snapshot.access.message === SERVER_LIST_PENDING_MESSAGE);
