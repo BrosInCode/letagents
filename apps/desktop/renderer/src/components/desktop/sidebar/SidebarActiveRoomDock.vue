@@ -81,7 +81,7 @@ defineEmits<{ reveal: [] }>();
   min-height: 36px;
   padding: 0 10px 0 8px;
   border-radius: 7px;
-  background: var(--sidebar-open-room-fill, color-mix(in srgb, var(--text) 12%, transparent));
+  background: var(--sidebar-selected);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 9%, transparent);
   transition: background-color 120ms ease, transform 120ms var(--ease-out);
 }
@@ -185,7 +185,14 @@ defineEmits<{ reveal: [] }>();
 
 @media (hover: hover) and (pointer: fine) {
   .sidebar-active-dock:hover .sidebar-active-dock-row {
-    background: color-mix(in srgb, var(--text) 15%, transparent);
+    background: color-mix(in srgb, var(--sidebar-selected) 78%, var(--text) 6%);
+  }
+}
+
+@media (prefers-contrast: more) {
+  .sidebar-active-dock-row {
+    outline: 1px solid var(--border-accent);
+    outline-offset: -1px;
   }
 }
 

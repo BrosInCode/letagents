@@ -238,6 +238,16 @@
   stroke-width: 3;
 }
 
+/* While the "you are here" dock covers an edge of the list, a row that gets
+   keyboard focus scrolls clear of it instead of hiding under it. */
+.sidebar-room-sections[data-dock-edge="top"] {
+  scroll-padding-top: 52px;
+}
+
+.sidebar-room-sections[data-dock-edge="bottom"] {
+  scroll-padding-bottom: 52px;
+}
+
 /* Pinned rooms and rooms scroll together, so neither is clipped in its own box. */
 .sidebar-room-sections {
   display: flex;

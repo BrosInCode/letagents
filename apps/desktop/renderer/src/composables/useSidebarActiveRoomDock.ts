@@ -75,10 +75,19 @@ export function useSidebarActiveRoomDock(options: {
     scrolledList = list;
   }
 
-  /** Scrolls the open room's row to the middle of the list. */
+  /**
+   * Scrolls the open room's row to the middle of the list. The dock leaves
+   * once the row shows, so keyboard focus moves to the row first instead of
+   * falling to the page.
+   */
   function reveal(): void {
+    const row = options.activeRow();
+    if (!row) return;
+    const focusInDock = document.activeElement instanceof HTMLElement
+      && Boolean(document.activeElement.closest("[data-testid='sidebar-active-room-dock']"));
+    if (focusInDock) row.focus({ preventScroll: true });
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    options.activeRow()?.scrollIntoView({ block: "center", inline: "nearest", behavior: reduceMotion ? "instant" : "smooth" });
+    row.scrollIntoView({ block: "center", inline: "nearest", behavior: reduceMotion ? "instant" : "smooth" });
   }
 
   watch(options.sources, () => { void nextTick(observe); }, { flush: "post" });

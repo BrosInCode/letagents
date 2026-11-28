@@ -54,7 +54,7 @@
         </button>
       </div>
 
-      <div class="sidebar-room-sections" ref="roomSectionsElement">
+      <div class="sidebar-room-sections" ref="roomSectionsElement" :data-dock-edge="activeRoomDock.edge.value ?? undefined">
       <section v-if="pinnedProjectEntries.length" class="sidebar-pinned-section" data-testid="sidebar-section-pinned">
         <button
           class="sidebar-section-header pinned-section-header"
@@ -1681,17 +1681,24 @@ const activeRoomDock = useSidebarActiveRoomDock({
   list: roomSectionsElement,
   activeRow: () => {
     if (props.activeEntry.type !== "room") return null;
-    // A row inside a closing group is about to go; its project's row stays.
+    // A row inside a closing group or section is about to go: its project's
+    // row stands in, unless that row is closing too.
     const row = sidebarRow(props.activeEntry.id);
-    if (row && !row.closest(".sidebar-reveal-leave-active")) return row;
-    return activeProject.value ? sidebarRow(activeProject.value.parent.id) : null;
+    if (row && !isClosingSidebarRow(row)) return row;
+    const projectRow = activeProject.value ? sidebarRow(activeProject.value.parent.id) : null;
+    return projectRow && !isClosingSidebarRow(projectRow) ? projectRow : null;
   },
-  enabled: () => props.activeEntry.type === "room" && !props.selectionActive,
+  // A drag scrolls the list near its edges, where the dock would sit.
+  enabled: () => props.activeEntry.type === "room" && !props.selectionActive && !dragState.value,
   sources: [
     () => props.activeEntry.id, () => props.projectEntries, () => props.pinnedCollapsed, () => props.roomsCollapsed,
     () => props.collapsedProjects, () => props.selectionActive, zenMode, expandedProjectRoomLists,
+    () => Boolean(activeProject.value && projectIsCollapsed(activeProject.value.id)), () => Boolean(dragState.value),
   ],
 });
+function isClosingSidebarRow(row: HTMLElement): boolean {
+  return Boolean(row.closest(".sidebar-reveal-leave-active, .sidebar-pinned-reveal-leave-active"));
+}
 const activeRoomDockTitle = computed<{ title: string; parentTitle: string | null; kind: RoomEntry["kind"] }>(() => {
   const entry = props.activeEntry;
   if (entry.type !== "room") return { title: "", parentTitle: null, kind: "parent" };
