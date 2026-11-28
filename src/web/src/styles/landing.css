@@ -44,6 +44,31 @@
   --blue-text: #60a5fa;
   --amber-text: #fbbf24;
   --red-text: #f87171;
+  /* The older names that the docs and code blocks read. A saved light theme defines them on
+     the root, and the values that refer to other tokens resolve there, so all are set again. */
+  --bg-0: #0a0a0a;
+  --bg-1: #111111;
+  --bg-2: #141414;
+  --surface: #161616;
+  --surface-hover: #1f1f1f;
+  --panel: #111111;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --muted: #71717a;
+  --task-assigned: #a855f7;
+  --task-in-review: #38bdf8;
+  --code-bg: #141414;
+  --code-header-bg: #1a1a1a;
+  --code-text: var(--text);
+  --code-comment: var(--text-secondary);
+  --code-keyword: var(--task-assigned);
+  --code-string: var(--green-text);
+  --code-number: var(--amber-text);
+  --code-function: var(--blue-text);
+  --code-variable: var(--task-in-review);
+  --code-type: var(--red-text);
+  --scrollbar-thumb: color-mix(in srgb, var(--text) 24%, transparent);
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--text) 38%, transparent);
   position: relative;
   isolation: isolate;
   background: #0a0a0a;
@@ -55,11 +80,16 @@ html:has(#letagents-app.landing-theme),
 html:has(#letagents-app.landing-theme) body {
   color-scheme: dark;
   background: #0a0a0a;
+  /* The page scrollbar belongs to <html>, outside the app: a saved light theme would give it
+     a near-black thumb on the dark page. */
+  --scrollbar-thumb: rgba(250, 250, 250, 0.24);
+  --scrollbar-thumb-hover: rgba(250, 250, 250, 0.38);
 }
 
-/* The room form page (/new) is taller than a phone screen: once it scrolls, the header gets
-   a dark backing so fields never pass under the bare links. The landing page keeps none. */
-[data-route="new-room"].landing-theme .navbar.navbar--scrolled {
+/* The room form page (/new) and the docs scroll: once they do, the header gets a dark backing
+   so text never passes under the bare links. The landing page keeps none. */
+[data-route="new-room"].landing-theme .navbar.navbar--scrolled,
+[data-route="docs"].landing-theme .navbar.navbar--scrolled {
   background: rgba(10, 10, 10, 0.86);
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
@@ -155,4 +185,14 @@ html:has(#letagents-app.landing-theme) body {
   .landing-theme .navbar { padding: 9px 8px; }
   .landing-theme .nav-brand { gap: 4px; }
   .landing-theme .nav-name { font-size: 0.72rem; }
+}
+
+/* The docs on the ink: the same grain as the landing page, fixed to the screen while the text
+   scrolls. The page and the desktop sidebar drop their fills so the grain shows through. */
+.landing-theme .docs-page > .docs-grain { position: fixed; }
+.landing-theme .docs-page { background: transparent; }
+@media (min-width: 801px) {
+  .landing-theme .docs-page .sidebar { background: transparent; }
+  /* The fixed sidebar is clear now, so the footer sits beside it, under the text column. */
+  [data-route="docs"].landing-theme > .footer { margin-left: 260px; }
 }

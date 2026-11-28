@@ -20,7 +20,7 @@
         <circle cx="128" cy="64" r="5" fill="#7fe0bd" />
       </svg>
     </div>
-    <div class="welcome-grain" :style="{ backgroundImage: grain }" aria-hidden="true" />
+    <InkGrain />
 
     <div ref="copy" class="welcome-copy">
       <h1 id="welcome-title">
@@ -31,7 +31,6 @@
       <div id="download-mac" class="downloads reveal" role="group" aria-label="Download the desktop app">
         <a v-for="(link, index) in downloadLinks" :key="link.href" class="download" :data-primary="index === 0"
           :href="link.href" :aria-label="`Download for ${link.label}`" @click="onDownload($event)">
-          <span v-if="index === 0" class="download-glow" aria-hidden="true" />
           <span class="download-ring" aria-hidden="true"><span class="download-spin" /></span>
           <span class="download-face">
             <span class="download-icon" aria-hidden="true">
@@ -54,6 +53,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import DesktopPlatformIcon from './DesktopPlatformIcon.vue'
+import InkGrain from './InkGrain.vue'
 import { useInkScene, type InkMarkPlacement } from '../../../../../shared/ui/ink/useInkScene'
 import {
   desktopDownloadOffer,
@@ -80,7 +80,6 @@ const downloadLinks = computed(() => {
 const root = ref<HTMLElement | null>(null)
 const copy = ref<HTMLElement | null>(null)
 const sceneCanvas = ref<HTMLCanvasElement | null>(null)
-const grain = ref('')
 const markStyle = ref<Record<string, string>>({})
 
 // The mark forms in the free space between the navigation bar and the copy.
@@ -117,27 +116,12 @@ function onDownload(event: MouseEvent) {
   ink.pulseToward(event.currentTarget as HTMLElement)
 }
 
-function makeGrain() {
-  const tile = document.createElement('canvas')
-  tile.width = tile.height = 160
-  const context = tile.getContext('2d')
-  if (!context) return
-  const image = context.createImageData(160, 160)
-  for (let i = 0; i < image.data.length; i += 4) {
-    const value = Math.random() * 255
-    image.data[i] = image.data[i + 1] = image.data[i + 2] = value
-    image.data[i + 3] = 255
-  }
-  context.putImageData(image, 0, 0)
-  grain.value = `url(${tile.toDataURL()})`
-}
 
 
 onMounted(() => {
   void fetchCurrentMacDesktopBeta()
     .then((release) => { macDesktopBeta.value = release })
     .catch(() => { /* Keep the bundled fallback. */ })
-  makeGrain()
   window.addEventListener('resize', onFallbackResize)
 })
 
@@ -167,7 +151,6 @@ onUnmounted(() => window.removeEventListener('resize', onFallbackResize))
   text-align: center;
   -webkit-font-smoothing: antialiased;
 }
-.welcome-grain { position: absolute; inset: 0; z-index: -1; opacity: .045; pointer-events: none; }
 /* The shader is the whole page, behind the type. */
 .welcome-scene { position: absolute; inset: 0; z-index: -3; width: 100%; height: 100%; transition: opacity 450ms ease; }
 /* Hidden at once while the ink is simulated again; it fades back in when ready. */
@@ -216,7 +199,7 @@ onUnmounted(() => window.removeEventListener('resize', onFallbackResize))
 }
 /* Each button is an ink-edged slab: a slowly turning warm-and-mint edge (a transform, so the
    compositor turns it without repainting), a face above it, and a download arrow. The visitor's
-   own platform is the lit slab with a coloured glow beneath it. */
+   own platform is the lit slab. */
 .download {
   position: relative; isolation: isolate;
   display: block; width: 232px; height: 80px;
@@ -242,13 +225,6 @@ onUnmounted(() => window.removeEventListener('resize', onFallbackResize))
   will-change: transform;
 }
 .download[data-primary="false"] .download-spin { animation-duration: 11s; }
-/* A pool of both inks under the main button, outside its clear face. */
-.download-glow {
-  position: absolute; left: 18px; right: 18px; bottom: -22px; height: 22px; z-index: -2; border-radius: 50%;
-  background: linear-gradient(90deg, rgba(240, 138, 75, .7), rgba(127, 224, 189, .75));
-  filter: blur(18px); opacity: .7;
-  transition: opacity 260ms ease, transform 260ms cubic-bezier(.23, 1, .32, 1);
-}
 .download-face {
   position: absolute; inset: 1.5px; border-radius: 20.5px;
   display: flex; align-items: center; justify-content: center; gap: 14px; padding: 0 20px;
@@ -270,7 +246,6 @@ onUnmounted(() => window.removeEventListener('resize', onFallbackResize))
 @media (hover: hover) and (pointer: fine) {
   .download:hover { transform: translateY(-3px); }
   .download:hover .download-ring { opacity: 1; }
-  .download:hover .download-glow { opacity: 1; transform: translateY(4px) scale(1.05); }
   .download:hover .download-arrow { box-shadow: inset 0 0 0 1px rgba(239, 238, 230, .4); }
   .download[data-primary="true"]:hover .download-arrow { box-shadow: inset 0 0 0 1px rgba(127, 224, 189, .9); }
   .download:hover .download-arrow svg { transform: translateY(2px); }
@@ -289,7 +264,7 @@ onUnmounted(() => window.removeEventListener('resize', onFallbackResize))
 
 @media (prefers-reduced-motion: reduce) {
   .line > span, .reveal, .welcome-mark { animation: fade 400ms ease both !important; }
-  .download, .download-ring, .download-glow, .download-arrow svg { transition: none; }
+  .download, .download-ring, .download-arrow svg { transition: none; }
   .download-spin { animation: none; }
 }
 
