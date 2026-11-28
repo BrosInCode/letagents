@@ -1,6 +1,7 @@
 import { readLocalSupervisorPresence } from "./local-supervision-authority.js";
 import type { DesktopRoomSnapshot, DesktopRoomSnapshotOptions } from "../../ipc-types.js";
 import { basename } from "node:path";
+import { SERVER_LIST_PENDING_MESSAGE } from "../../../../../shared/local-room-identity.mjs";
 import { resolveWorkspaceRoom } from "../../repo-status.js";
 import { forgetJoinedRoomInfo } from "./room-info.js";
 import { DesktopApiError } from "../auth.js";
@@ -8,6 +9,7 @@ import { workspaceRoot } from "#provider-runtime/paths.js";
 import {
   createLocalRoom,
   cloudRoomIdentifierForStorage,
+  folderRoomAwaitsServerList,
   listLocalTasks,
   resolveLocalAwareRoomStorageMode,
 } from "./local-store.js";
@@ -49,6 +51,11 @@ export async function fetchRoomSnapshot(
   try {
     const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
     if (storage.effectiveMode === "local") {
+      // The server's room list is not here yet: a folder-derived id might be a
+      // server room, so no local record is made. The caller reads again once the list answers.
+      if (await folderRoomAwaitsServerList(roomIdentifier)) {
+        return createUnavailableRoomSnapshot(roomIdentifier, new Error(SERVER_LIST_PENDING_MESSAGE));
+      }
       if (!storage.localRoom && !create) {
         return createRoomNotFoundSnapshot(roomIdentifier);
       }

@@ -1,4 +1,5 @@
 import { activityUnread } from '../../../../../shared/ui/activity/unread';
+import { isFolderDerivedLocalRoomId, SERVER_LIST_PENDING_MESSAGE } from "../../../../../shared/local-room-identity.mjs";
 import { computed, getCurrentScope, onScopeDispose, ref, toRaw, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -478,6 +479,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     snapshot: DesktopRoomSnapshot,
     accountRooms: readonly DesktopAccountRoomEntry[],
   ): Promise<DesktopRoomSnapshot> {
+    // A folder-derived id read before the account's room list answered comes
+    // back unavailable (no local record is made). The list has answered by
+    // now, so read it once more.
+    if (requestedRoomIdentifier && isFolderDerivedLocalRoomId(requestedRoomIdentifier)
+      && snapshot.access.status === "unavailable" && !snapshot.access.httpStatus) {
+      const reread = await getRoomSnapshot(requestedRoomIdentifier);
+      if (reread.access.status !== "unavailable") return reread;
+    }
     if (!shouldRecoverRootRoomSnapshot(requestedRoomIdentifier, snapshot)) {
       return snapshot;
     }
@@ -579,6 +588,17 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       toRaw(options.accountRooms.value),
       allAccountRooms.filter((room) => !room.archived),
     );
+    // A room read while the list was unknown shows "waiting for your room list".
+    // A server list is here, so read that room once more (once per list answer).
+    // Offline, the answer holds only this device's rooms (`source: "local"`): the server list is still unknown.
+    if (!allAccountRooms.some((room) => room.source !== "local")) return;
+    const waiting = (snapshot: DesktopRoomSnapshot | null) => Boolean(snapshot
+      && snapshot.access.status === "unavailable" && !snapshot.access.httpStatus
+      && snapshot.access.message === SERVER_LIST_PENDING_MESSAGE);
+    if (waiting(options.rootRoomSnapshot.value)) await refresh();
+    else if (waiting(options.selectedSnapshot.value)) {
+      await refreshSelectedSnapshot(options.rootRoomSnapshot.value, { fresh: true });
+    }
   }
 
   function selectedRootPath(): string | null {

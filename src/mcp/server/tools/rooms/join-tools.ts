@@ -67,7 +67,7 @@ export function registerRoomJoinTools(server: McpServer): void {
 
   server.tool(
     "join_room",
-    "Join a named room on Let Agents Chat. Creates the room if it doesn't exist. Use this for repo-based room joining. "
+    "Join a named room on Let Agents Chat. Creates the room if it doesn't exist, except names that start with local- or local_ (those are kept for rooms on one device). Use this for repo-based room joining. "
       + "If someone gave you an invite code (XXXX-XXXX), use join_code with it instead.",
     {
       name: z.string().describe("The room name to join (e.g. 'github.com/owner/repo')"),

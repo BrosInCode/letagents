@@ -23,6 +23,8 @@ export type RoomEntry = {
   latestMessageId: string | null;
   latestMessageAt: string | null;
   hasUnread: boolean;
+  /** The room lives only on this device (a local- id the server does not list). */
+  localOnly?: boolean;
   /** Agents working in this room right now, as the activity stream reports. */
   activity?: SidebarRoomActivity | null;
   unreadCount?: number;

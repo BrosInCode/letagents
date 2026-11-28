@@ -160,6 +160,17 @@ export function isReservedMainRoomCreationId(roomId: string): boolean {
     || /(?:^|\/)focus\//i.test(normalized);
 }
 
+/**
+ * Ids in the desktop's device-only namespace (`local-…`, `local_…`). A request
+ * may open an existing room with such an id but may not create a new one.
+ */
+export const LOCAL_ROOM_NAME_REFUSAL =
+  "Room names that start with local- or local_ are kept for rooms on one device. Choose another name.";
+
+export function isDeviceLocalRoomIdShape(roomId: string): boolean {
+  return /^local[-_]/i.test(roomId.trim());
+}
+
 // ── Classification ────────────────────────────────────────────────────────
 
 /**

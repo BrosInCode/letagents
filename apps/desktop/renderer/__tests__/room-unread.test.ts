@@ -9,7 +9,8 @@ import ts from "typescript";
 import { createServer } from "vite";
 import { createRenderer, h, reactive, ref, ssrContextKey } from "vue";
 import { createRoomUnreadStore } from "../../../../shared/room-unread.mjs";
-import { localAccountRoomKeys, markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
+import { localAccountRoomKeys, serverAccountRoomKeys, markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
+import { isDeviceLocalRoomId } from "../../../../shared/local-room-identity.mjs";
 import { normalizeRoomIdentifier } from "../src/domain/sidebar-rooms";
 import { appFunction } from "./app-source";
 import { roomShellSource } from "./room-shell-source";
@@ -24,7 +25,7 @@ test("per-room storage controls refresh the unread history namespace, including 
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
     }).outputText;
   }
-  const appCode = ts.transpileModule(["handleRoomShellRefresh", "roomHistoryMode", "roomUsesLocalHistory", "loadChatStorageSettings"]
+  const appCode = ts.transpileModule(["handleRoomShellRefresh", "roomHistoryMode", "roomUsesLocalHistory", "roomIsLocalOnly", "loadChatStorageSettings"]
     .map(appFunction).join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const shellCode = await functionsFrom("../src/components/desktop/content/DesktopRoomShell.vue", ["setRoomStorageMode", "forkRoomToLocal"]);
   const roomIdentifier = "github.com/acme/repo";
@@ -42,11 +43,12 @@ test("per-room storage controls refresh the unread history namespace, including 
     forkRoomToLocal: async () => { persistedMode = "local"; return { snapshot: snapshot() }; },
   };
   const appContext: Record<string, unknown> = {
-    roomReadKey, chatStorageSettings, sidebarLatestMessages, normalizeRoomIdentifier,
+    isDeviceLocalRoomId, roomReadKey, chatStorageSettings, sidebarLatestMessages, normalizeRoomIdentifier,
     selectedSnapshot, selectedRootRoomIdentifier, activeEntry, sidebarProjectEntries: ref([]),
     accountRooms: ref([{ roomIdentifier, source: "cloud", focusRooms: [] }]),
     // The composable's computed set of local account rooms, read fresh here.
     get localRoomKeys() { return { value: localAccountRoomKeys((appContext.accountRooms as { value: never }).value) }; },
+    get serverRoomKeys() { return { value: serverAccountRoomKeys((appContext.accountRooms as { value: never }).value) }; },
     sessionGeneration: ref(1), getChatStorageBridge: () => bridge,
     chatStorageFeedback: ref(null), handleRefreshRoom() { appliedSnapshots++; }, syncSelectedRoomStream() {},
     refreshSidebarLatestMessages: async () => {
