@@ -101,7 +101,9 @@ export async function loadAccountRoomUnread(input: {
       CROSS JOIN LATERAL (
         SELECT count(*)::int AS unread, (count(*) FILTER (WHERE rows.mentioned))::int AS mention_unread FROM (
           SELECT COALESCE(m.text ~* $5::text, FALSE) AS mentioned
-            FROM messages m WHERE ${counted} AND NOT ${GITHUB_SQL} LIMIT $4
+            FROM messages m WHERE ${counted} AND NOT ${GITHUB_SQL}
+           -- Newest first: past the cap the newest messages decide the mention count (a mention is usually recent).
+           ORDER BY m.number DESC LIMIT $4
         ) AS rows
       ) AS plain
   `, [roomIds, input.accountId, ownNames, UNREAD_COUNT_CAP, mentionPattern]);

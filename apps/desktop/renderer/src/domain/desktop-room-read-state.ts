@@ -185,7 +185,7 @@ export async function countUnreadRoomMessages(input: {
   latestMessageId: string;
   previous?: RoomUnreadSnapshot;
   ownSenderNames: readonly string[];
-  /** The account's login: a counted message that mentions it also counts in `mentionCount`. */
+  /** The account's login: a counted message that mentions it also counts in `mentionCount`; GitHub events never do, as on the server. */
   mentionLogin?: string | null;
   githubEventsVisible?: boolean;
   loadPage(afterMessageId: string | null): Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
@@ -224,7 +224,7 @@ export async function countUnreadRoomMessages(input: {
         || (!githubEventsVisible && isGitHubRoomMessage(message));
       if (!ownMessage && !promptOnly && !agentStatus && !hiddenGitHubEvent) {
         result.count += 1;
-        if (input.mentionLogin && mentionsPerson(message.text, input.mentionLogin)) result.mentionCount += 1;
+        if (input.mentionLogin && !isGitHubRoomMessage(message) && mentionsPerson(message.text, input.mentionLogin)) result.mentionCount += 1;
       }
     }
     if (!page.hasMore || page.messages.some((message) => messageNumber(message.id) >= latestNumber)) break;

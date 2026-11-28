@@ -148,14 +148,14 @@ test("a collapsed group and a \"Show more\" overflow total the unread mentions f
     parent: room("parent", { unreadCount: 3, mentionCount: 1, hasUnread: true }),
     focusRooms: [
       room("focus_1", { kind: "focus", unreadCount: 7, mentionCount: 2, hasUnread: true }),
-      room("focus_2", { kind: "focus", unreadCount: 4, mentionCount: 5, hasUnread: true }),
+      room("focus_2", { kind: "focus", unreadCount: 4, mentionCount: 4, hasUnread: true }),
     ],
     branchRooms: [room("branch", { kind: "branch", unreadCount: 2, hasUnread: true })],
   };
   assert.equal(sidebarGroupUnread(project, false).mentionCount, 1, "expanded, the parent counts only its own room");
-  assert.equal(sidebarGroupUnread(project, true).mentionCount, 8, "collapsed, every room under the fold adds its mentions");
+  assert.equal(sidebarGroupUnread(project, true).mentionCount, 7, "collapsed, every room under the fold adds its mentions");
   assert.equal(sidebarGroupUnread(project, true).count, 16, "the unread count is unchanged");
   const muted = (id: string | null | undefined) => id === "focus_2";
   assert.equal(sidebarGroupUnread(project, true, muted).mentionCount, 3, "a muted room folded under the row is left out, as for the count");
-  assert.equal(sidebarUnreadTotal([project.focusRooms[0]!, project.focusRooms[1]!]).mentionCount, 7, "an overflow total adds the hidden rooms");
+  assert.equal(sidebarUnreadTotal([project.focusRooms[0]!, project.focusRooms[1]!]).mentionCount, 6, "an overflow total adds the hidden rooms");
 });

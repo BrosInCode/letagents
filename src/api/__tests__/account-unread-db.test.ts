@@ -123,6 +123,23 @@ test("unread counts stop at the cap", { skip }, async () => {
   assert.equal(row!.unread_count, unread!.UNREAD_COUNT_CAP);
 });
 
+test("past the cap, the newest unread messages decide the mention count", { skip }, async () => {
+  const me = await account("Emmy");
+  const room = await api!.createProjectWithName("unread-cap-mention");
+  const first = await api!.addMessage(room.id, "Ada", "start", { source: "browser" });
+  await read(room.id, me.id, num(first.id), num(first.id));
+  await client!.pool.query(`
+    INSERT INTO messages (room_id, number, sender, text, source, timestamp)
+    SELECT $1, $2 + n, 'Ada', 'bulk ' || n, 'browser', now() FROM generate_series(1, $3) AS n
+  `, [room.id, num(first.id), unread!.UNREAD_COUNT_CAP * 3]);
+  await client!.pool.query(
+    "INSERT INTO messages (room_id, number, sender, text, source, timestamp) VALUES ($1, $2, 'Ada', 'urgent @emmy please look', 'browser', now())",
+    [room.id, num(first.id) + unread!.UNREAD_COUNT_CAP * 3 + 1]);
+  const [row] = await unread!.loadAccountRoomUnread({ accountId: me.id, ownSenderNames: [], mentionLogin: "Emmy", roomIds: [room.id] });
+  assert.equal(row!.unread_count, unread!.UNREAD_COUNT_CAP);
+  assert.equal(row!.mention_unread_count, 1, "the mention in the newest message is found past the cap");
+});
+
 test("Needs you for the account matches each room's attention route and skips rooms it cannot read", { skip }, async () => {
   const me = await account("Emmy");
   const admin = await api!.createProjectWithName("attention-admin");
