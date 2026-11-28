@@ -7,6 +7,8 @@ export interface DesktopServerRoomUnread {
   unreadCount: number | null;
   /** GitHub events after the read point that show when the room shows GitHub events in chat. */
   githubUnreadCount: number | null;
+  /** The part of `unreadCount` that mentions this account (`@login`); null when the count is null, or the server is older and sends none. */
+  mentionUnreadCount: number | null;
 }
 
 export interface DesktopAccountUnread {

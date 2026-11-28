@@ -71,12 +71,13 @@ export function registerAccountUnreadRoutes(app: Express, deps: AccountUnreadRou
       const unread = new Map((await deps.loadAccountRoomUnread({
         accountId: account.account_id,
         ownSenderNames: [account.login, displayName ?? ""],
+        mentionLogin: account.login,
         roomIds: [...allowed],
       })).map((row) => [row.room_id, row]));
       // A room that cannot be decided now has no count; the desktop then counts it from room history, as before.
       res.json({
         rooms: rooms.map((room) => unread.get(room.room_id)
-          ?? { room_id: room.room_id, read_message_id: null, unread_count: null, github_unread_count: null }),
+          ?? { room_id: room.room_id, read_message_id: null, unread_count: null, github_unread_count: null, mention_unread_count: null }),
         cap: UNREAD_COUNT_CAP, limited,
       });
     } catch (error) {

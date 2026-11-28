@@ -167,6 +167,7 @@ export function useAppSidebarMessages(context: unknown) {
       latestMessageId,
       latestMessageAt: latestMessageAtForEntry(entry),
       unreadCount: app.unreadRoomCounts.value[roomReadKey(entry.roomIdentifier) || ""] || 0,
+      mentionCount: app.unreadRoomMentionCounts.value[roomReadKey(entry.roomIdentifier) || ""] || 0,
       hasUnread: Boolean(roomUnread.get(entry.roomIdentifier)) || (app.unreadRoomCounts.value[roomReadKey(entry.roomIdentifier) || ""] || 0) > 0,
     };
   }

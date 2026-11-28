@@ -65,30 +65,46 @@ test("unread counts follow the account's read point and the desktop's rules", { 
   await send("Worker", "[status] reading the diff", { source: "agent" }); // the room view hides status posts
   await send("Worker", "[STATUS] still reading", { source: "agent" });
   await send("Ada", "[status] is just how I start this line", { account_id: other.id }); // a person's text is shown
+  // Mentions: only counted messages that name the login count; every uncounted kind stays out.
+  await send("Ada", "counted mention: hello @emmy, please look", { account_id: other.id });
+  await send("Ada", "counted mention: (@EMMY) and again, thanks @Emmy.", { account_id: other.id });
+  await send("Ada", "no mention: email me@emmy.example or @emmyx or @emmy.dev or a/@emmy or @@emmy", { account_id: other.id });
+  await send("Worker", "counted mention from my own agent @Emmy", { source: "agent", account_id: me.id, publisher_agent_key: `${me.id}/worker` });
+  await send("Emmy", "own message, not counted: @Emmy", { account_id: me.id });
+  await send("Worker", "[status] mentions @Emmy but is hidden", { source: "agent" });
+  await send("Worker", "@Emmy", { source: "agent", agent_prompt_kind: "auto" }); // the prompt has text, so it is counted
+  await send("github", "Pull request #13 by Ada mentions @Emmy", { source: "github" }); // GitHub events are counted apart
   const noSource = await send("Ada", "a message stored with no source", { account_id: other.id });
   await client!.pool.query("UPDATE messages SET source = NULL WHERE room_id = $1 AND number = $2", [room.id, num(noSource.id)]);
   await send("github", "Check \"build\" (GitHub Actions) success in BrosInCode/letagents https://github.com/x/y/runs/1", { source: "github" });
   await send("github", "check \"lint\" SKIPPED in BrosInCode/letagents linked to task_7", { source: "github" });
   await send("github", "Check \"test\" failure in BrosInCode/letagents https://github.com/x/y/runs/2", { source: "github" });
   await send("github", "Pull request #12 opened by Ada", { source: "github" });
-  const hidden = await send("Ada", "a rental message hidden from the room", { account_id: other.id });
+  const hidden = await send("Ada", "a rental message hidden from the room @Emmy", { account_id: other.id });
   await client!.pool.query("UPDATE messages SET visibility = 'internal' WHERE room_id = $1 AND number = $2", [room.id, num(hidden.id)]);
 
-  const rows = await unread!.loadAccountRoomUnread({ accountId: me.id, ownSenderNames: ["Emmy", "Emmy Display"], roomIds: [room.id, quiet.id, room.id] });
+  const rows = await unread!.loadAccountRoomUnread({ accountId: me.id, ownSenderNames: ["Emmy", "Emmy Display"], mentionLogin: "Emmy", roomIds: [room.id, quiet.id, room.id] });
   const byRoom = new Map(rows.map((row) => [row.room_id, row]));
   assert.equal(rows.length, 2);
   assert.deepEqual(byRoom.get(room.id), {
     room_id: room.id, read_message_id: first.id,
-    unread_count: 4, // another person, my own agent, a person's line that starts like a status, a message with no source
-    github_unread_count: 2, // the failed check and the pull request; passing and skipped checks never count
+    // another person, my own agent, a person's line that starts like a status, a message with no source,
+    // and five mention-test lines (two from Ada, the near misses, my own agent, an agent prompt with text)
+    unread_count: 9,
+    mention_unread_count: 4, // two from Ada, my own agent's, the auto prompt: not the near misses, my own, the hidden, the GitHub event
+    github_unread_count: 3, // the failed check and two pull requests; passing and skipped checks never count
   });
-  assert.deepEqual(byRoom.get(quiet.id), { room_id: quiet.id, read_message_id: null, unread_count: null, github_unread_count: null });
+  assert.deepEqual(byRoom.get(quiet.id), { room_id: quiet.id, read_message_id: null, unread_count: null, github_unread_count: null, mention_unread_count: null });
+  // No login: nothing mentions the account, and the count still exists.
+  const [noLogin] = await unread!.loadAccountRoomUnread({ accountId: me.id, ownSenderNames: ["Emmy", "Emmy Display"], roomIds: [room.id] });
+  assert.equal(noLogin!.mention_unread_count, 0);
+  assert.equal(noLogin!.unread_count, 9);
 
   // The read point is the furthest read in any scope, on any device.
   const last = await send("Ada", "the newest", { account_id: other.id });
   await read(room.id, me.id, num(last.id), num(last.id), "thread", num(first.id));
-  const [after] = await unread!.loadAccountRoomUnread({ accountId: me.id, ownSenderNames: ["Emmy"], roomIds: [room.id] });
-  assert.deepEqual(after, { room_id: room.id, read_message_id: last.id, unread_count: 0, github_unread_count: 0 });
+  const [after] = await unread!.loadAccountRoomUnread({ accountId: me.id, ownSenderNames: ["Emmy"], mentionLogin: "Emmy", roomIds: [room.id] });
+  assert.deepEqual(after, { room_id: room.id, read_message_id: last.id, unread_count: 0, github_unread_count: 0, mention_unread_count: 0 });
   // Another account's reads are its own.
   const [theirs] = await unread!.loadAccountRoomUnread({ accountId: other.id, ownSenderNames: ["Ada"], roomIds: [room.id] });
   assert.equal(theirs!.read_message_id, null);

@@ -287,7 +287,7 @@ export function useAppSidebarEntries(context: unknown) {
     selectedSnapshot, sidebarRoomIdentifiers, sidebarRoomOrder, sidebarSelectedEntryIds,
     sidebarSelectionActive, withRoomUnreadState,
   } = app;
-  const { roomCounts: unreadRoomCounts, refresh: refreshUnreadCounts } = useDesktopUnreadCounts({
+  const { roomCounts: unreadRoomCounts, roomMentionCounts: unreadRoomMentionCounts, refresh: refreshUnreadCounts } = useDesktopUnreadCounts({
     account: computed(() => authStatus.value?.authenticated ? authStatus.value.account : null),
     rooms: computed(() => flattenSidebarRoomEntries(projectEntries.value).flatMap((entry) =>
       entry.roomIdentifier ? [{
@@ -314,7 +314,7 @@ export function useAppSidebarEntries(context: unknown) {
     },
     legacyReadMarkers: () => (app as { legacyReadMarkers?: { value: Record<string, string> } }).legacyReadMarkers?.value ?? {},
   });
-  Object.assign(app, { unreadRoomCounts, refreshUnreadCounts });
+  Object.assign(app, { unreadRoomCounts, unreadRoomMentionCounts, refreshUnreadCounts });
 
   const sidebarProjectEntries = computed(() =>
     applySidebarRoomOrder(companyProjectGroups(projectEntries.value, app.company.activeId.value, app.company.rooms.value).map((project) => ({
@@ -362,7 +362,7 @@ export function useAppSidebarEntries(context: unknown) {
     }
   );
   return {
-    unreadRoomCounts, refreshUnreadCounts, sidebarProjectEntries, sidebarSelectedEntries,
+    unreadRoomCounts, unreadRoomMentionCounts, refreshUnreadCounts, sidebarProjectEntries, sidebarSelectedEntries,
     selectedRoomRenderKey, selectedRoomStorage,
   };
 }
