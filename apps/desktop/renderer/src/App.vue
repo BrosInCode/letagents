@@ -505,7 +505,7 @@
 <script setup lang="ts">
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { computed, defineAsyncComponent, ref, watch, watchEffect } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch, watchEffect } from "vue";
 import { roomThemeId, type RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
 import { provideRoomTheme } from "../../../../shared/ui/room-theme";
 import { useKeyWhileShown } from "./composables/useKeyWhileShown";
@@ -884,8 +884,14 @@ watchEffect(() => {
 });
 // A very slow start (a cold Git read outside every timeout) must not keep the
 // whole window covered: after 8 s the app shows with its own room loader.
-const firstLoadVeilLimit = window.setTimeout(() => { firstLoadDone.value = true; }, 8_000);
+// The limit starts when the splash ends, so a slow splash never shows its plain mark.
+let firstLoadVeilLimit = 0;
+watch(showFirstRunSplash, (splash) => {
+  if (splash || firstLoadDone.value || firstLoadVeilLimit) return;
+  firstLoadVeilLimit = window.setTimeout(() => { firstLoadDone.value = true; }, 8_000);
+}, { immediate: true });
 watch(firstLoadDone, (done) => { if (done) window.clearTimeout(firstLoadVeilLimit); });
+onBeforeUnmount(() => window.clearTimeout(firstLoadVeilLimit));
 // App's setup runs before the startup load begins: "nothing loading" counts as
 // done only once a load has been seen.
 let firstLoadSeen = false;
