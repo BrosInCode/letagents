@@ -80,6 +80,10 @@ html:has(#letagents-app.landing-theme),
 html:has(#letagents-app.landing-theme) body {
   color-scheme: dark;
   background: #0a0a0a;
+  /* The page scrollbar belongs to <html>, outside the app: a saved light theme would give it
+     a near-black thumb on the dark page. */
+  --scrollbar-thumb: rgba(250, 250, 250, 0.24);
+  --scrollbar-thumb-hover: rgba(250, 250, 250, 0.38);
 }
 
 /* The room form page (/new) and the docs scroll: once they do, the header gets a dark backing
@@ -189,4 +193,6 @@ html:has(#letagents-app.landing-theme) body {
 .landing-theme .docs-page { background: transparent; }
 @media (min-width: 801px) {
   .landing-theme .docs-page .sidebar { background: transparent; }
+  /* The fixed sidebar is clear now, so the footer sits beside it, under the text column. */
+  [data-route="docs"].landing-theme > .footer { margin-left: 260px; }
 }
