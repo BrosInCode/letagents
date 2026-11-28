@@ -518,6 +518,37 @@ test("evaluateReviewLeaseRouting rejects unassigned reviewers when routing is sc
   assert.equal(result.kind === "deny" ? result.code : null, "unassigned_reviewer");
 });
 
+test("evaluateReviewLeaseRouting denies an actor with no agent key", () => {
+  const result = evaluateReviewLeaseRouting({
+    taskId: "task_90",
+    actor: {
+      actorLabel: "Anonymous | Agent",
+      agentKey: null,
+    },
+    leases: [lease()],
+    now: new Date("2026-04-19T19:00:00.000Z"),
+  });
+
+  assert.equal(result.kind, "deny");
+  assert.equal(result.kind === "deny" ? result.code : null, "missing_actor");
+});
+
+test("evaluateReviewLeaseRouting allows an actor whose own work lease has expired", () => {
+  const result = evaluateReviewLeaseRouting({
+    taskId: "task_90",
+    actor: {
+      actorLabel: "BayOtter | EmmyMay's agent | Agent",
+      agentKey: "EmmyMay/bayotter",
+      agentInstanceId: "instance:bayotter-1",
+    },
+    leases: [lease({ expires_at: "2026-04-19T18:00:00.000Z" })],
+    now: new Date("2026-04-19T19:00:00.000Z"),
+  });
+
+  assert.equal(result.kind, "allow");
+  assert.equal(result.kind === "allow" ? result.activeWorkLease : undefined, null);
+});
+
 test("findBoardReviewLeaseForMerge requires a reviewer separate from the work holder", () => {
   const now = new Date("2026-04-19T19:00:00.000Z");
   const workLease = lease({
