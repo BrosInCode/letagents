@@ -1696,6 +1696,30 @@ describe("useDesktopAppData root room refresh", () => {
     assert.equal(harness.rootRoomSnapshot.value?.room?.displayName, "letagents");
   });
 
+  it("opens the room without waiting for a slow folder Git status, and applies the status when it comes", async () => {
+    // A cold Git read of a repository with hundreds of worktrees took over 15 s.
+    // The room had arrived in a second, but the first load waited for both and
+    // timed out as "This room didn't load".
+    const harness = createHarness({ selectedRootRoomIdentifier: "room_parent", snapshotTimeoutMs: 4_000 });
+    harness.rootRoomSnapshot.value = null;
+    harness.activeEntry.value = parentEntry();
+    let answerStatus: (status: RepoStatus) => void = () => undefined;
+    const bridge = harness.windowBridge as { letagentsDesktop: { repos: { getStatus: () => Promise<RepoStatus> } } };
+    bridge.letagentsDesktop.repos.getStatus = () => new Promise((resolve) => { answerStatus = resolve; });
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const started = Date.now();
+      await harness.state.refresh();
+      assert.ok(Date.now() - started < 2_500, "the room waits one short grace for Git, not one per caller");
+      assert.ok(harness.rootRoomSnapshot.value, "the root room loaded");
+      assert.equal(harness.selectedSnapshot.value?.access.status, "ready", "the room shows, not an error");
+      assert.equal(harness.repoStatus.value, null, "no folder details yet");
+      answerStatus({ ...repoStatusFixture(), branch: "late-branch" });
+      await flushAsync();
+    });
+    assert.equal(harness.repoStatus.value?.branch, "late-branch", "the late Git status is applied to the same room");
+  });
+
   it("keeps live tasks, reasoning and artifacts when a board action refreshes the root room", async () => {
     const harness = createHarness();
     harness.activeEntry.value = parentEntry();

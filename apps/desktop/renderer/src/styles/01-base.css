@@ -3,7 +3,8 @@
   --bg: light-dark(#ffffff, #0a0a0a);
   --bg-subtle: light-dark(#fafafa, #111111);
   --bg-card: light-dark(#f4f4f5, #141414);
-  --bg-elevated: light-dark(#ffffff, #1a1a1a);
+  /* A room theme tints menus and pop-ups through --workspace-elevated. */
+  --bg-elevated: var(--workspace-elevated, light-dark(#ffffff, #1a1a1a));
   --text: light-dark(#09090b, #fafafa);
   --text-secondary: light-dark(#52525b, #a1a1aa);
   --text-tertiary: light-dark(#71717a, #8d8d97);

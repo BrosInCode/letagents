@@ -207,6 +207,25 @@ test("a retry whose answer is GitHub not answering starts the 30 s backoff", asy
   } finally { app.unmount(); }
 });
 
+test("a retry keeps the failed room's card on screen and says it is retrying", async () => {
+  Object.assign(globalThis, { window: { setInterval: () => 0, clearInterval: () => undefined, matchMedia: () => ({ matches: false }) } });
+  const access = Vue.ref<DesktopRoomAccess>({ ...githubUnavailable(), title: "Room unavailable", code: null, httpStatus: 502 });
+  const pending = Vue.ref(false);
+  const { root, app } = mount(AuthOnboardingView, () => ({ access: access.value, authStatus, busy: false, feedback: null,
+    snapshotPending: pending.value, roomLabel: "github.com/acme/app", sidebarMode: "expanded" }));
+  const byTestId = (id: string) => descendants(root).find((node) => node.props["data-testid"] === id);
+  try {
+    await flush();
+    assert.ok(byTestId("auth-access-panel"), "the failure shows its card");
+    pending.value = true;
+    await flush();
+    assert.ok(byTestId("auth-access-panel"), "the retry does not swap the card for the first-load ink");
+    assert.equal(byTestId("ink-room-loader"), undefined);
+    assert.match(text(root), /This room didn.t load/);
+    assert.match(text(root), /Retrying…/);
+  } finally { app.unmount(); }
+});
+
 test("the Join room window opens a members-only room, so its card can ask to join", async () => {
   const { useDesktopNewRoomModal } = await vite.ssrLoadModule("/renderer/src/composables/useDesktopNewRoomModal.ts") as typeof import("../src/composables/useDesktopNewRoomModal");
   const refused = { roomIdentifier: "design-room", access: membershipAccess(null), room: null };
