@@ -56,6 +56,7 @@ const NEXT: Record<LaunchPhase, LaunchPhase | null> = {
 };
 
 const INSTALL_PATTERN = /\bspawn\b[^\n]{0,200}\bENOENT\b|command not found|executable not found|not installed/i;
+const OPEN_MODEL_ENDPOINT_AUTH_PATTERN = /\bThe model endpoint rejected authentication\b/i;
 const SIGN_IN_PATTERN = /\b(?:HTTP|status|error|code)[ :=]*40[13]\b|\b40[13] (?:Unauthorized|Forbidden)\b|unauthori[sz]ed|invalid api key|not (?:signed|logged) in|sign[ -]?in required|log ?in required|please (?:run|use) [^\n]{0,40}login|authentication (?:failed|required|error)/i;
 
 /** One recovery kind from a launch error. The error text itself never leaves the daemon. */
@@ -76,6 +77,7 @@ export function launchFailureAction(error: unknown): LaunchFailureAction {
   try { visit(error, 0); } catch { return "retry"; }
   const text = texts.join("\n");
   if (INSTALL_PATTERN.test(text)) return "install";
+  if (OPEN_MODEL_ENDPOINT_AUTH_PATTERN.test(text)) return "retry";
   if (SIGN_IN_PATTERN.test(text)) return "sign_in";
   return "retry";
 }

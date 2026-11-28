@@ -1,4 +1,15 @@
 <template>
+  <!--
+    Start-up: one ink scene from the first frame, over the splash and the first room
+    load, until the room (or its answer: sign-in, onboarding, an error) is ready.
+  -->
+  <Transition
+    name="room-arrival"
+    @before-leave="roomLoaderHandOff.beforeLeave"
+    @after-leave="roomLoaderHandOff.afterLeave"
+  >
+    <FirstLoadVeil v-if="firstLoadVeil" :label="selectedRoomInfo.displayName || selectedRoomInfo.name || 'LetAgents'" />
+  </Transition>
   <FirstRunSplashView v-if="showFirstRunSplash" />
 
   <main
@@ -56,8 +67,9 @@
     :data-sidebar-resizing="isSidebarResizing"
     :style="[desktopShellStyle, roomTheme.css.value]"
     :data-room-theme="roomTheme.effective.value"
-    :inert="roomArrival === 'waiting'"
+    :inert="roomArrival === 'waiting' || firstLoadVeil"
     data-testid="desktop-shell"
+    data-app-texture
   >
     <Transition name="desktop-sidebar">
       <div
@@ -172,6 +184,7 @@
               <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
             </svg>
           </button>
+          <HistoryArrows />
         </template>
       </PrivateMessages>
       <CompanyHome
@@ -187,22 +200,30 @@
         @retry="company.refresh"
         @open-github="company.openOnGitHub"
       />
-      <AuthOnboardingView
-        v-if="!showCompanyHome && activeEntry.type === 'room' && selectedNeedsAccess"
-        :sidebar-mode="sidebarMode"
-        :access="selectedAccess"
-        :auth-status="authStatus"
-        :busy="authBusy || loading"
-        :feedback="authFeedback"
-        :snapshot-pending="authSnapshotPending"
-        :room-label="selectedRoomInfo.displayName || selectedRoomInfo.name"
-        @start-auth="startAuthFlow"
-        @open-verification="openVerification"
-        @poll-auth="pollAuthFlow"
-        @refresh-room="refresh"
-        @sign-out="signOut"
-        @cycle-sidebar="cycleSidebar"
-      />
+      <!-- The room arriving: this screen fades out over it (room-loader-handoff.ts). -->
+      <Transition
+        :name="roomShellShown ? 'room-arrival' : 'room-depart'"
+        @before-leave="roomLoaderHandOff.beforeLeave"
+        @after-leave="roomLoaderHandOff.afterLeave"
+      >
+        <AuthOnboardingView
+          v-if="!showCompanyHome && activeEntry.type === 'room' && selectedNeedsAccess"
+          :sidebar-mode="sidebarMode"
+          :access="selectedAccess"
+          :auth-status="authStatus"
+          :busy="authBusy || loading"
+          :feedback="authFeedback"
+          :snapshot-pending="authSnapshotPending"
+          :ink-loader="!firstLoadVeil"
+          :room-label="selectedRoomInfo.displayName || selectedRoomInfo.name"
+          @start-auth="startAuthFlow"
+          @open-verification="openVerification"
+          @poll-auth="pollAuthFlow"
+          @refresh-room="refresh"
+          @sign-out="signOut"
+          @cycle-sidebar="cycleSidebar"
+        />
+      </Transition>
 
       <!-- KeepAlive keeps the open room while Settings, Inbox or company home hide it.
            It is keyed by the last shown room: with only the inner key, a switch after a same-room
@@ -340,6 +361,7 @@
           <button class="ghost-button sidebar-reveal-button" type="button" aria-label="Show sidebar" title="Show sidebar" data-testid="sidebar-reveal-button" @click="cycleSidebar">
             <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1Z" /><path d="M12.5 3.5v13" /><path d="m7.5 7.5 2.5 2.5-2.5 2.5" /></svg>
           </button>
+          <HistoryArrows />
         </template>
       </MyWorkView>
 
@@ -483,7 +505,7 @@
 <script setup lang="ts">
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { computed, defineAsyncComponent, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch, watchEffect } from "vue";
 import { roomThemeId, type RoomCompanyAppearance } from "../../../../shared/room-themes.mjs";
 import { provideRoomTheme } from "../../../../shared/ui/room-theme";
 import { useKeyWhileShown } from "./composables/useKeyWhileShown";
@@ -504,11 +526,19 @@ import RoomDeletionDialog from "./components/desktop/content/RoomDeletionDialog.
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
+import FirstLoadVeil from "./components/desktop/content/FirstLoadVeil.vue";
+import HistoryArrows from "./components/desktop/controls/HistoryArrows.vue";
+import { provideRoomLoaderHandOff } from "./components/desktop/content/room-loader-handoff";
 import { isMembershipRefusal } from "./components/desktop/content/auth-onboarding";
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialog.vue";
 import OnboardingFlow from "./components/desktop/onboarding/OnboardingFlow.vue";
+import { useFilmGrainBehind } from "./components/desktop/onboarding/useFilmGrain";
+import { useAppAppearance } from "./composables/useAppAppearance";
+import { useRootStyle } from "./composables/useRootStyle";
+import { useEntryHistory } from "./composables/useEntryHistory";
+import { flattenSidebarRoomEntries } from "./domain/sidebar-room-selection";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
 import InboxView from "./components/desktop/content/InboxView.vue";
@@ -741,6 +771,11 @@ const roomCompany = computed<RoomCompanyAppearance | null>(() => {
   return company.resolveRoomAppearance(roomAppearance);
 });
 const roomTheme = provideRoomTheme(themeAccountKey, roomCompany);
+// Menus and dialogs moved to <body> follow the theme too.
+useRootStyle(() => roomTheme.css.value);
+// Demo: the onboarding film grain as the app background.
+const appGrain = useFilmGrainBehind();
+useAppAppearance(appGrain);
 // An older API does not return a revision or expose the company theme write route.
 const canSetCompanyTheme = computed(() => company.organizations.value.some(org =>
   org.github_org_id === roomCompany.value?.id && org.setup && org.role === "owner"
@@ -826,4 +861,44 @@ function openOnboardingNewRoom(mode: "create" | "join" | "project") {
 const roomShellShown = computed(() =>
   !showCompanyHome.value && activeEntry.value.type === "room" && !selectedNeedsAccess.value);
 const roomShellKeepAliveKey = useKeyWhileShown(roomShellShown, selectedRoomRenderKey);
+const roomLoaderHandOff = provideRoomLoaderHandOff(() => roomShellShown.value);
+// Back and forward through the places opened in this window (the sidebar's ‹ ›, ⌘[ and ⌘]).
+useEntryHistory({
+  activeEntry,
+  // The restored room replaces a placeholder at start-up; that is no step back.
+  recording: () => firstLoadDone.value,
+  open: handleSidebarEntrySelected,
+  // A room that was left or deleted is skipped; other places always exist.
+  resolve: (entry) => entry.type !== "room" ? entry
+    : flattenSidebarRoomEntries(app.projectEntries.value).find((room) => room.id === entry.id)
+      ?? (entry.id === currentParentRoom.value.id ? currentParentRoom.value : null),
+});
+// The first load shows only the ink (FirstLoadVeil) until the room arrives, or
+// until it is answered otherwise (an error, a sign-in step, another page).
+const firstLoadDone = ref(false);
+// Not during the onboarding's flight into the first room: it shows its own arrival.
+const firstLoadVeil = computed(() => !firstLoadDone.value && !roomArrival.value);
+// Sign-in and onboarding are answers too: the veil gives way to their screens.
+watchEffect(() => {
+  if (!firstLoadDone.value && !showFirstRunSplash.value && (showFirstRunGate.value || showSignedOutGate.value)) firstLoadDone.value = true;
+});
+// A very slow start (a cold Git read outside every timeout) must not keep the
+// whole window covered: after 8 s the app shows with its own room loader.
+// The limit starts when the splash ends, so a slow splash never shows its plain mark.
+let firstLoadVeilLimit = 0;
+watch(showFirstRunSplash, (splash) => {
+  if (splash || firstLoadDone.value || firstLoadVeilLimit) return;
+  firstLoadVeilLimit = window.setTimeout(() => { firstLoadDone.value = true; }, 8_000);
+}, { immediate: true });
+watch(firstLoadDone, (done) => { if (done) window.clearTimeout(firstLoadVeilLimit); });
+onBeforeUnmount(() => window.clearTimeout(firstLoadVeilLimit));
+// App's setup runs before the startup load begins: "nothing loading" counts as
+// done only once a load has been seen.
+let firstLoadSeen = false;
+watchEffect(() => {
+  if (firstLoadDone.value) return;
+  const busy = loading.value || authSnapshotPending.value;
+  if (busy) firstLoadSeen = true;
+  if (roomShellShown.value || (firstLoadSeen && !busy)) firstLoadDone.value = true;
+});
 </script>

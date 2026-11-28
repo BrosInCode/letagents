@@ -470,6 +470,54 @@ test("Open Model requires an explicit limit when endpoint metadata is missing or
   await assert.rejects(resolveOpenModelLimits({ ...input, contextWindow: NaN }), /whole number/);
 });
 
+test("Open Model reads context_window_tokens / maximum_output_tokens and surfaces HTTP 401/403 auth rejections", async () => {
+  const input = { baseUrl: "https://provider.example/v1", apiKey: "xpl_secret", model: "glm-5.3" };
+  assert.deepEqual(
+    await resolveOpenModelLimits(input, async () => Response.json({
+      data: [{ id: "glm-5.3", context_window_tokens: 1_048_576, maximum_output_tokens: 131_072 }],
+    })),
+    { context: 1_048_576, output: 8192 },
+  );
+  assert.deepEqual(
+    await resolveOpenModelLimits({ ...input, model: "small" }, async () => Response.json({
+      data: [{ id: "small", context_window_tokens: 16_000, maximum_output_tokens: 2000 }],
+    })),
+    { context: 16_000, output: 2000 },
+  );
+  // top_provider.context_length caps context_window_tokens and rejects <= 1.
+  assert.deepEqual(
+    await resolveOpenModelLimits(input, async () => Response.json({
+      data: [{ id: "glm-5.3", context_window_tokens: 1_048_576, top_provider: { context_length: 262_144 } }],
+    })),
+    { context: 262_144, output: 8192 },
+  );
+  await assert.rejects(
+    resolveOpenModelLimits(input, async () => Response.json({
+      data: [{ id: "glm-5.3", context_window_tokens: 262_144, top_provider: { context_length: 1 } }],
+    })),
+    /Set its context window/,
+  );
+  // Standard context_length / max_output_tokens take precedence over *_tokens aliases.
+  assert.deepEqual(
+    await resolveOpenModelLimits({ ...input, model: "both" }, async () => Response.json({
+      data: [{ id: "both", context_length: 64_000, context_window_tokens: 1_048_576, max_output_tokens: 4096, maximum_output_tokens: 2048 }],
+    })),
+    { context: 64_000, output: 4096 },
+  );
+  for (const status of [401, 403]) {
+    await assert.rejects(
+      resolveOpenModelLimits(input, async () => new Response("Bearer xpl_secret invalid", { status })),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, new RegExp(`rejected authentication \\(HTTP ${status}\\)`));
+        assert.match(message, /Open Model settings/);
+        assert.doesNotMatch(message, /xpl_secret|Bearer/);
+        return true;
+      },
+    );
+  }
+});
+
 test("saved context limits stay with their endpoint and model", async () => {
   const storePath = await tempSettingsPath();
   const options = { storePath, secretStorage };

@@ -4,6 +4,8 @@
       <button class="ghost-button sidebar-reveal-button desktop-room-sidebar-reveal" type="button" aria-label="Show sidebar" data-testid="room-sidebar-reveal-button" @click="emit('cycleSidebar')">
         <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1ZM12.5 3.5v13m-5-9 2.5 2.5-2.5 2.5" /></svg>
       </button>
+      <!-- The sidebar's back and forward stay at hand while it is hidden. -->
+      <HistoryArrows class="desktop-room-history" />
       <h3 class="desktop-room-toolbar-title" :title="room.gitRoom ? `${room.displayName} · ${room.gitRoom.repository.fullName}` : room.displayName">{{ headerDisplayName }}</h3>
     </template>
       <nav ref="tabsElement" class="desktop-room-tabs room-view-tabs" aria-label="Room navigation" data-testid="desktop-room-tabs">
@@ -145,6 +147,7 @@
 import { Compass } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
+import HistoryArrows from "../../controls/HistoryArrows.vue";
 import RoomViewCount from "../../../../../../../../shared/ui/RoomViewCount.vue";
 import RoomAttentionButton from "../../../../../../../../shared/ui/RoomAttentionButton.vue";
 import "../../../../../../../../shared/ui/room-navigation.css";

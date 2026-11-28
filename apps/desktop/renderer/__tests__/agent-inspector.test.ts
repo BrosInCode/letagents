@@ -429,6 +429,16 @@ test("a start refused over the owner's own setup leads with the reason and the w
   assert.doesNotMatch(projection?.now?.summary ?? "", /convergence scheduler failure/);
 });
 
+test("an Open Model context-window failure leads with the actionable reason, not the scheduler prefix", () => {
+  const reason = "The model endpoint did not provide a context window for this model. Set its context window in Open Model settings, save it as the default model, and try again.";
+  const projection = projectAgentInspector(entry({
+    provider: "open-model", observedState: "starting", condition: "coordination_blocked",
+    lastError: `convergence scheduler failure: ${reason}`,
+  }), { roomId: "focus_1" });
+  assert.equal(projection?.now?.summary, reason);
+  assert.doesNotMatch(projection?.now?.summary ?? "", /convergence scheduler failure/);
+});
+
 test("a refused Codex sandbox startup offers confirmed recovery despite retained PID and idle evidence", () => {
   const lastError = "convergence scheduler failure: Codex did not answer when LetAgents asked for its settings "
     + "(Codex did not answer in time), so LetAgents will not start it at a sandboxed access level. Start the agent again.";

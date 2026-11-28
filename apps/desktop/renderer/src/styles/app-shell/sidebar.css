@@ -78,6 +78,16 @@
   height: 17px;
 }
 
+/* Back and forward sit just after the window buttons; a little narrower, so all five fit. */
+.sidebar-history {
+  display: flex;
+  margin-inline-end: 4px;
+}
+
+.sidebar-history .sidebar-topbar-action {
+  width: 26px;
+}
+
 .sidebar-topbar-action:disabled {
   opacity: 0.45;
   cursor: default;
