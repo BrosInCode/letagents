@@ -1,6 +1,7 @@
 import { readLocalSupervisorPresence } from "./local-supervision-authority.js";
 import type { DesktopRoomSnapshot, DesktopRoomSnapshotOptions } from "../../ipc-types.js";
 import { basename } from "node:path";
+import { SERVER_LIST_PENDING_MESSAGE } from "../../../../../shared/local-room-identity.mjs";
 import { resolveWorkspaceRoom } from "../../repo-status.js";
 import { forgetJoinedRoomInfo } from "./room-info.js";
 import { DesktopApiError } from "../auth.js";
@@ -25,8 +26,6 @@ import {
   createRoomNotFoundSnapshot,
   createUnavailableRoomSnapshot,
 } from "./snapshot/snapshots.js";
-
-const SERVER_LIST_PENDING_MESSAGE = "Waiting for your room list. LetAgents will try this room again.";
 
 export async function fetchRoomSnapshot(
   requestedRoomIdentifier?: string | null,

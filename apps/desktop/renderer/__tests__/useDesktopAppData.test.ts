@@ -25,6 +25,7 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../src/components/desktop/types";
+import { SERVER_LIST_PENDING_MESSAGE } from "../../../../shared/local-room-identity.mjs";
 import { useDesktopAppData } from "../src/composables/useDesktopAppData";
 import type { RecentRootRoom } from "../src/domain/sidebar-rooms";
 
@@ -1713,6 +1714,44 @@ describe("useDesktopAppData root room refresh", () => {
     await withDesktopBridge(harness.windowBridge, () => harness.state.refresh());
     assert.deepEqual(harness.getSnapshotRequests.slice(0, 2), [id, id]);
     assert.equal(harness.rootRoomSnapshot.value?.access.status, "ready");
+  });
+
+  it("reads a root room that waits for the room list again when a list answer arrives, once", async () => {
+    const id = "local-autodownloader-7d47027e95";
+    const harness = createHarness({ selectedRootRoomIdentifier: id });
+    harness.activeEntry.value = { ...parentEntry(), roomIdentifier: id };
+    const waiting = nonReadySnapshot(id, "unavailable");
+    waiting.access.message = SERVER_LIST_PENDING_MESSAGE;
+    harness.rootRoomSnapshot.value = waiting;
+    harness.nextAccountRooms = [accountRoomEntry(id, { displayName: "fern-river" })];
+    const bridge = harness.windowBridge as { letagentsDesktop: { room: {
+      getSnapshot: (identifier: string | null) => Promise<DesktopRoomSnapshot>;
+    } } };
+    let online = false;
+    bridge.letagentsDesktop.room.getSnapshot = async (identifier) => {
+      harness.getSnapshotRequests.push(identifier);
+      if (online) return roomSnapshot(id);
+      const again = nonReadySnapshot(identifier!, "unavailable");
+      again.access.message = SERVER_LIST_PENDING_MESSAGE;
+      return again;
+    };
+    await withDesktopBridge(harness.windowBridge, async () => {
+      // Offline: the list answer is empty, so nothing is read again.
+      harness.nextAccountRooms = [];
+      await harness.state.refreshAccountRooms();
+      assert.equal(harness.getSnapshotRequests.length, 0);
+      // The network is back and the list answers: the waiting room is read again.
+      online = true;
+      harness.nextAccountRooms = [accountRoomEntry(id, { displayName: "fern-river" })];
+      await harness.state.refreshAccountRooms();
+      const reads = harness.getSnapshotRequests.filter((request) => request === id).length;
+      assert.ok(reads >= 1);
+      assert.equal(harness.rootRoomSnapshot.value?.access.status, "ready");
+      // The room is ready now: the next list answer reads nothing.
+      const before = harness.getSnapshotRequests.length;
+      await harness.state.refreshAccountRooms();
+      assert.equal(harness.getSnapshotRequests.length, before);
+    });
   });
 
   it("opens the room without waiting for a slow folder Git status, and applies the status when it comes", async () => {

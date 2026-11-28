@@ -21,3 +21,6 @@ export function isDeviceLocalRoomId(identifier, cloudProven = false) {
   if (!DEVICE_LOCAL_PREFIX.test(value)) return false;
   return !(cloudProven && FOLDER_DERIVED_ROOM_ID.test(value));
 }
+
+/** The text of the snapshot a folder-derived room gets while the account's room list is not known yet. */
+export const SERVER_LIST_PENDING_MESSAGE = "Waiting for your room list. LetAgents will try this room again.";

@@ -25,12 +25,14 @@ mock.module("electron", {
   namedExports: { ipcMain: fakeIpcMain },
 });
 
+let storageOverride: { effectiveMode: string; localRoom: null; roomIdentifier?: string } | null = null;
+
 // The create handler asks which storage a room uses. Every room here is a
 // remote room, so the local-room branch never touches the user's chat store.
 mock.module("../main/rooms.js", {
   namedExports: {
     ...await import("../main/rooms.js"),
-    getDesktopRoomStorage: async () => ({ effectiveMode: "remote", localRoom: null }),
+    getDesktopRoomStorage: async () => storageOverride ?? ({ effectiveMode: "remote", localRoom: null }),
   },
 });
 
@@ -192,6 +194,29 @@ for (const kind of ["unexpected", "blocked"] as const) {
     assert.match(String(logged[0]![0]), new RegExp(run.entryId));
   });
 }
+
+test("create-agent makes no stub local record for a folder-derived room while the room list is unknown", async (t) => {
+  const run = launchRun(t, "list_pending");
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  const { getLocalRoomIncludingArchived } = await import("../main/rooms/local-store.js");
+  const id = "local-pendingagent-0123456789";
+  servers.resetServerListedRooms();
+  servers.setServerListWaitGate(async () => true);
+  storageOverride = { effectiveMode: "local", localRoom: null, roomIdentifier: id };
+  t.after(() => { storageOverride = null; servers.resetServerListedRooms(); servers.setServerListWaitGate(async () => false); });
+  t.mock.method(console, "error", () => {});
+  stubDaemonReachable(t, run);
+  let installs = 0;
+  patch(t, supervisorGrantCoordinator, "createAndInstall", async () => { installs += 1; return savedEntry(run.entryId); });
+
+  await assert.rejects(
+    invoke("desktop:supervisor:create-agent", createInput(run.launchId, { roomIdentifier: id })),
+    /still waiting for your room list/,
+  );
+  assert.equal(await getLocalRoomIncludingArchived(id), null, "no record was made");
+  assert.equal(installs, 0);
+  assert.deepEqual(run.timeline, ["launch.requested", "launch.blocked"]);
+});
 
 test("create-agent refuses an unavailable permission profile before it saves anything", async (t) => {
   const run = launchRun(t, "bad_profile");

@@ -1,5 +1,5 @@
 import { activityUnread } from '../../../../../shared/ui/activity/unread';
-import { isFolderDerivedLocalRoomId } from "../../../../../shared/local-room-identity.mjs";
+import { isFolderDerivedLocalRoomId, SERVER_LIST_PENDING_MESSAGE } from "../../../../../shared/local-room-identity.mjs";
 import { computed, getCurrentScope, onScopeDispose, ref, toRaw, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -588,6 +588,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       toRaw(options.accountRooms.value),
       allAccountRooms.filter((room) => !room.archived),
     );
+    // A room read while the list was unknown shows "waiting for your room list".
+    // The list is here, so read that room once more (once per list answer).
+    if (!allAccountRooms.length) return;
+    const waiting = (snapshot: DesktopRoomSnapshot | null) => Boolean(snapshot
+      && snapshot.access.status === "unavailable" && !snapshot.access.httpStatus
+      && snapshot.access.message === SERVER_LIST_PENDING_MESSAGE);
+    if (waiting(options.rootRoomSnapshot.value)) await refresh();
+    else if (waiting(options.selectedSnapshot.value)) {
+      await refreshSelectedSnapshot(options.rootRoomSnapshot.value, { fresh: true });
+    }
   }
 
   function selectedRootPath(): string | null {

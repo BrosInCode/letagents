@@ -1,4 +1,4 @@
-import { createLocalRoom, localRoomIdentifierForStorage } from "../rooms/local-store.js";
+import { createLocalRoom, folderRoomAwaitsServerList, localRoomIdentifierForStorage } from "../rooms/local-store.js";
 import type { IpcMain } from "electron";
 import { randomUUID } from "node:crypto";
 
@@ -159,6 +159,10 @@ export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
         if (storage.effectiveMode === "local") {
           input.localRoomId = localRoomIdentifierForStorage(storage, roomIdentifier);
           input.roomIdentifier = input.localRoomId;
+          // While the account's room list is unknown, a folder-derived id might be a server room: no stub record.
+          if (!storage.localRoom && await folderRoomAwaitsServerList(input.localRoomId)) {
+            throw new LaunchBlockedError("LetAgents is still waiting for your room list. Try adding the agent again in a moment.", "retry");
+          }
           if (!storage.localRoom) await createLocalRoom({ roomIdentifier: input.localRoomId, displayName: roomIdentifier });
         }
         if (provider !== "codex" && provider !== "claude-code" && provider !== "cursor" && provider !== "open-model" && provider !== "antigravity") {
