@@ -43,9 +43,28 @@ test("a public GitHub repo room needs a sign-in and a GitHub role on the reposit
   assert.deepEqual(roleChecks, ["github.com/brosincode/letagents:EmmyMay", "github.com/brosincode/letagents:EmmyMay"]);
   assert.deepEqual(
     await decide({ ...account, provider_access_token: "" }, true),
-    { kind: "repo_collaborator_required" },
-    "without a GitHub token the role cannot be checked",
+    { kind: "github_sign_in_required" },
+    "without a GitHub token the role cannot be checked: a new GitHub sign-in clears it",
   );
+  assert.deepEqual(
+    await decide({ ...account, provider: "email", provider_access_token: "" }, true),
+    { kind: "repo_collaborator_required" },
+    "an account that is not a GitHub account cannot sign in with GitHub again",
+  );
+  assert.equal(roleChecks.length, 2, "no GitHub lookup without a token");
+});
+
+test("a private repo room asks a GitHub account with no live token to sign in with GitHub again", async () => {
+  const decide = (sessionAccount: { provider: string; provider_access_token: string | null; login: string }) =>
+    resolveGitHubRepoRoomAccessDecision(
+      { roomName: "github.com/brosincode/secret-repo", sessionAccount },
+      {
+        getVisibility: async () => "private",
+        isCollaborator: async () => { throw new Error("no token: GitHub must not be asked"); },
+      },
+    );
+  assert.deepEqual(await decide({ provider: "github", provider_access_token: null, login: "EmmyMay" }), { kind: "github_sign_in_required" });
+  assert.deepEqual(await decide({ provider: "email", provider_access_token: null, login: "EmmyMay" }), { kind: "private_repo_no_access" });
 });
 
 test("a GitHub role on a public repository means owner, triage or more, never read alone", async () => {

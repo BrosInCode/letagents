@@ -8,6 +8,8 @@ export declare const REPO_ACCESS_UNAVAILABLE_MESSAGE: string;
 export declare const ROOM_MEMBERSHIP_REQUIRED_MESSAGE: string;
 export declare const REPO_COLLABORATOR_REQUIRED_MESSAGE: string;
 export declare const REPO_ROOM_USES_GITHUB_ROLES_MESSAGE: string;
+export declare const GITHUB_SIGN_IN_REQUIRED_REASON: 'github_sign_in_required';
+export declare const GITHUB_SIGN_IN_REQUIRED_MESSAGE: string;
 
 export type RoomMemberRole = 'admin' | 'member';
 export type RoomMemberSource = 'creator' | 'seed' | 'approved_request' | 'invite';
@@ -72,6 +74,8 @@ export interface RoomMembershipRequiredBody {
 export interface RepoCollaboratorRequiredBody {
   error: 'repo_collaborator_required';
   code: 'REPO_COLLABORATOR_REQUIRED';
+  /** Set when no live GitHub token let LetAgents ask for the role: sign in with GitHub again. */
+  reason?: 'github_sign_in_required';
   message: string;
   room_id: string;
 }
@@ -81,5 +85,9 @@ export declare function roomMembershipRequiredBody(input: {
   display_name?: string | null;
   join_request?: RoomJoinRequestSummary | null;
 }): RoomMembershipRequiredBody;
-export declare function repoCollaboratorRequiredBody(input: { room_id: string }): RepoCollaboratorRequiredBody;
+export declare function repoCollaboratorRequiredBody(input: {
+  room_id: string;
+  reason?: 'github_sign_in_required' | null;
+}): RepoCollaboratorRequiredBody;
+export declare function needsGitHubSignIn(body: unknown): boolean;
 export declare function roomAccessRefusal(body: unknown): 'membership_required' | 'repo_collaborator_required' | null;

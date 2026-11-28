@@ -1,6 +1,7 @@
 import { computed, type Ref } from 'vue'
 
 import {
+  GITHUB_SIGN_IN_REQUIRED_MESSAGE,
   REPO_ACCESS_UNAVAILABLE,
   REPO_COLLABORATOR_REQUIRED_MESSAGE,
   ROOM_MEMBERSHIP_REQUIRED_MESSAGE,
@@ -97,7 +98,9 @@ export function useRoomPresentation(input: {
     }
     if (accessCheckUnavailable.value) return 'GitHub is not answering'
     if (accessRefusal.value === 'membership_required') return 'Members only'
-    if (accessRefusal.value === 'repo_collaborator_required') return 'GitHub role required'
+    if (accessRefusal.value === 'repo_collaborator_required') {
+      return input.joinError.value?.needsGitHubSignIn ? 'GitHub sign-in required' : 'GitHub role required'
+    }
     return 'Could not connect to room.'
   })
 
@@ -109,7 +112,9 @@ export function useRoomPresentation(input: {
       return 'LetAgents could not check your role on this repository with GitHub. This is not a refusal.'
     }
     if (accessRefusal.value === 'membership_required') return ROOM_MEMBERSHIP_REQUIRED_MESSAGE
-    if (accessRefusal.value === 'repo_collaborator_required') return REPO_COLLABORATOR_REQUIRED_MESSAGE
+    if (accessRefusal.value === 'repo_collaborator_required') {
+      return input.joinError.value?.needsGitHubSignIn ? GITHUB_SIGN_IN_REQUIRED_MESSAGE : REPO_COLLABORATOR_REQUIRED_MESSAGE
+    }
     if (input.joinError.value?.code === 'PRIVATE_REPO_NO_ACCESS') {
       const login = input.authUser.value?.login
       return login

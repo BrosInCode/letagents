@@ -270,6 +270,24 @@ test("the join tools answer both refusals with a next step", async () => {
   assert.match(repo.message, /Ask a repository admin to add you on GitHub/);
 });
 
+test("a repo refusal for a missing GitHub token asks for a GitHub sign-in, not a repository role", async () => {
+  const body = repoCollaboratorRequiredBody({ room_id: "github.com/acme/site", reason: "github_sign_in_required" });
+  assert.equal(body.code, "REPO_COLLABORATOR_REQUIRED", "older clients still read a repo refusal");
+  for (const [name, input] of [
+    ["join_room", { name: "github.com/acme/site" }],
+    ["request_room_access", { room_id: "github.com/acme/site" }],
+  ] as const) {
+    refusingServer(body);
+    const result = await call(name, input);
+    assert.equal(result.success, false, name);
+    assert.equal(result.error, "github_sign_in_required", `${name}: ${JSON.stringify(result)}`);
+    assert.equal(result.next_step, "start_device_auth", name);
+    assert.equal(result.room_id, "github.com/acme/site", name);
+    assert.match(result.message, /Sign in to LetAgents with GitHub again/, name);
+    assert.doesNotMatch(result.message, /Ask a repository admin/, name);
+  }
+});
+
 test("resume_room_session answers a refusal for the saved room", async () => {
   globalThis.fetch = async () => new Response(null, { status: 204 });
   rememberRoom(toRoomState({ room_id: "room_secret", display_name: "Secret Room", joined_via: "join_room" }));

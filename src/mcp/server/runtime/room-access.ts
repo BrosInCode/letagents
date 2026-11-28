@@ -1,10 +1,12 @@
 import {
+  GITHUB_SIGN_IN_REQUIRED_MESSAGE,
   REPO_COLLABORATOR_REQUIRED_MESSAGE,
   ROOM_MEMBERSHIP_REQUIRED_MESSAGE,
   type RoomJoinRequestSummary,
 } from "../../../../shared/room-membership.mjs";
 import { RoomAccessRefusedError } from "./api.js";
 import { RepoRoomAuthRequiredError, toRepoRoomAuthRequiredResult } from "./device-auth.js";
+import { currentSessionScope } from "./session-scope.js";
 import { getWorkerBearerRuntime } from "./worker-bearer.js";
 
 /** A bot handed an invite code uses it rather than asking: an admin's invite lets it in at once. */
@@ -32,6 +34,22 @@ export function joinRequestInstruction(joinRequest: RoomJoinRequestSummary | nul
  * every room call fails the same way until an admin lets the account in.
  */
 export function toRoomAccessRefusalResult(error: RoomAccessRefusedError): Record<string, unknown> {
+  if (error.needsGitHubSignIn) {
+    // LetAgents could not ask GitHub: no live GitHub token for the person.
+    // A remote session (ChatGPT, Claude connectors) borrows the token of the
+    // person's latest GitHub sign-in, so a sign-in on the website clears it.
+    const remote = Boolean(currentSessionScope());
+    return {
+      success: false,
+      error: "github_sign_in_required",
+      next_step: remote ? "ask_your_user_to_sign_in" : "start_device_auth",
+      room_id: error.roomId,
+      message: `${error.serverMessage ?? GITHUB_SIGN_IN_REQUIRED_MESSAGE} `
+        + (remote
+          ? "Tell your user: sign in to letagents.chat with GitHub, then ask you to open the room again."
+          : "Call start_device_auth, let your user approve it, then call poll_device_auth and open the room again."),
+    };
+  }
   if (error.refusal === "repo_collaborator_required") {
     return {
       success: false,

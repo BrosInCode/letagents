@@ -25,6 +25,10 @@ export type RepoRoomAccessDecision =
   // A public repository: everyone can read the code, but only people with a
   // GitHub role on it may open its room.
   | { kind: "repo_collaborator_required" }
+  // A GitHub account with no live GitHub token on LetAgents (an expired web
+  // session, or a remote MCP grant whose person has no live token): GitHub
+  // was not asked. A new GitHub sign-in clears it.
+  | { kind: "github_sign_in_required" }
   // GitHub gave no answer to the role check (outage, rate limit, expired
   // token) and no recent positive answer stands in. Not a refusal: retry.
   | { kind: "repo_access_unavailable" }
@@ -1186,6 +1190,9 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   }
 
   if (visibility === "public") {
+    if (input.sessionAccount.provider === "github" && input.sessionAccount.login && !input.sessionAccount.provider_access_token) {
+      return { kind: "github_sign_in_required" };
+    }
     if (
       input.sessionAccount.provider !== "github" ||
       !input.sessionAccount.provider_access_token ||
@@ -1212,6 +1219,9 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
     return allowed ? { kind: "allow" } : { kind: "repo_collaborator_required" };
   }
 
+  if (input.sessionAccount.provider === "github" && input.sessionAccount.login && !input.sessionAccount.provider_access_token) {
+    return { kind: "github_sign_in_required" };
+  }
   if (
     input.sessionAccount.provider !== "github" ||
     !input.sessionAccount.provider_access_token ||

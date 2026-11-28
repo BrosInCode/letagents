@@ -66,6 +66,7 @@
       :displayName="joinError.displayName"
       :initialRequest="joinError.joinRequest"
       :login="auth.user.value?.login || null"
+      :needsGitHubSignIn="joinError.needsGitHubSignIn"
       @retry="retryJoin"
     />
 

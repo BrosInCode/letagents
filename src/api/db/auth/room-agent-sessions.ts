@@ -1203,6 +1203,35 @@ export interface ResolvedRoomAgentSessionBearer {
   session: RoomAgentSession;
 }
 
+/**
+ * A member removed from a room loses their own agents there at once. The
+ * removal ends those sessions, but a failure there is only logged; this
+ * condition makes the bearer stop working anyway, without waiting for it to
+ * expire. It matches the sessions removeRoomMember lists: the owner's own
+ * agents in the access room (the parent of a focus room), not agents lent
+ * through a rental or an agent ask. A removal record exists only for a person
+ * who is not a member now: adding them back deletes it.
+ */
+const notOwnedByRemovedMember = sql`NOT EXISTS (
+  SELECT 1
+  FROM rooms AS bearer_room
+  JOIN room_member_removals AS removal
+    ON removal.room_id = COALESCE(bearer_room.parent_room_id, bearer_room.id)
+   AND removal.account_id = ${room_agent_sessions.owner_account_id}
+  WHERE bearer_room.id = ${room_agent_sessions.room_id}
+    AND NOT EXISTS (SELECT 1 FROM room_members AS member
+      WHERE member.room_id = removal.room_id AND member.account_id = removal.account_id)
+    AND ${supervisor_host_grants.rental_session_id} IS NULL
+    AND COALESCE(${supervisor_host_grants.scope_key}, '') NOT LIKE 'ask:%'
+    -- These two tables have no index on room_agent_session_id. Tying each
+    -- lookup to the removal row keeps the planner from running it for every
+    -- bearer; it runs only for an owner who was removed.
+    AND NOT EXISTS (SELECT 1 FROM rental_sessions
+      WHERE room_agent_session_id = ${room_agent_sessions.session_id} AND removal.account_id IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM agent_asks
+      WHERE room_agent_session_id = ${room_agent_sessions.session_id} AND removal.account_id IS NOT NULL)
+)`;
+
 export async function getRoomAgentSessionBearerByToken(
   token: string
 ): Promise<ResolvedRoomAgentSessionBearer | null> {
@@ -1237,6 +1266,7 @@ export async function getRoomAgentSessionBearerByToken(
           gt(supervisor_host_grants.expires_at, now),
         ),
       ),
+      notOwnedByRemovedMember,
     ))
     .limit(1);
 
