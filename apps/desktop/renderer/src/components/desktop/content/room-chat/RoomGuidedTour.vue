@@ -340,7 +340,7 @@ function run() {
 }
 function placement(rect: Rect | null, box: DOMRect | null) {
   const r = rect ? `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.w)},${Math.round(rect.h)}` : "-";
-  return box ? `${r}|${Math.round(box.left)},${Math.round(box.top)}` : r;
+  return box ? `${r}|${Math.round(box.left)},${Math.round(box.top)},${Math.round(box.width)},${Math.round(box.height)}` : r;
 }
 /**
  * While the loop is stopped, look every MOVED_CHECK_MS whether the part or the card moved: a tab
