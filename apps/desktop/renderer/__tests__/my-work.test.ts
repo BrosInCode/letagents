@@ -40,6 +40,7 @@ import {
   safeWorkUrl,
   pullRequestKey,
   sessionMatches,
+  sessionPullRequestsByState,
   sessionRoomLabel,
   sessionsForCards,
   sessionStateLabel,
@@ -678,6 +679,12 @@ test("sessions join cards by pull request; only live or open-PR sessions without
   assert.equal(sessionRoomLabel(linked), "app");
   assert.equal(sessionRoomLabel(localSession({ projectRoomId: "git-room:local:0123", projectRoot: "/Users/emmy/todo app" })), "todo app");
   assert.equal(sessionMatches(openPr, "#90"), true);
+  assert.deepEqual(sessionPullRequestsByState([
+    { url: "u1", number: 2141, state: "CLOSED", branch: null },
+    { url: "u2", number: 2152, state: "MERGED", branch: null },
+    { url: "u3", number: 2156, state: "OPEN", branch: null },
+    { url: "u4", number: 2157, state: "OPEN", branch: null },
+  ]).map((pr) => pr.number), [2157, 2156, 2152, 2141]);
   assert.equal(sessionMatches(openPr, "codex"), false);
 });
 

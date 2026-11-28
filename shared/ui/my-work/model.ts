@@ -353,6 +353,19 @@ export function sessionsWithoutCard(
   );
 }
 
+const PULL_REQUEST_STATE_ORDER: Record<string, number> = { OPEN: 0, MERGED: 1, CLOSED: 2 };
+
+/** Open pull requests first, then merged, then closed; newest first within each. */
+export function sessionPullRequestsByState(
+  pullRequests: readonly MyWorkSessionPullRequest[],
+): MyWorkSessionPullRequest[] {
+  return [...pullRequests].sort(
+    (a, b) =>
+      (PULL_REQUEST_STATE_ORDER[a.state ?? ""] ?? 3) -
+        (PULL_REQUEST_STATE_ORDER[b.state ?? ""] ?? 3) || b.number - a.number,
+  );
+}
+
 export function sessionProviderLabel(
   provider: MyWorkLocalSession["provider"],
 ): string {

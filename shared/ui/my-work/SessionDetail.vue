@@ -61,7 +61,7 @@
       >
         <h3>Pull requests</h3>
         <a
-          v-for="pr in session.pullRequests"
+          v-for="pr in sortedPullRequests"
           :key="pr.url"
           class="work-session-pr"
           :href="safeWorkUrl(pr.url)"
@@ -96,11 +96,13 @@
   </div>
 </template>
 <script setup lang="ts">
+import { computed } from "vue";
 import type { MyWorkLocalSession } from "../../ticket-connectors.mjs";
 import ChatAvatar from "../ChatAvatar.vue";
 import WorkIcon from "./WorkIcon.vue";
 import {
   safeWorkUrl,
+  sessionPullRequestsByState,
   sessionProviderLabel,
   sessionRoomLabel,
   sessionStateLabel,
@@ -108,7 +110,7 @@ import {
   sessionTone,
   workDate,
 } from "./model";
-defineProps<{
+const props = defineProps<{
   session: MyWorkLocalSession;
   titleId: string;
   now: number;
@@ -120,6 +122,9 @@ const emit = defineEmits<{
   close: [];
   "open-session": [session: MyWorkLocalSession];
 }>();
+const sortedPullRequests = computed(() =>
+  sessionPullRequestsByState(props.session.pullRequests),
+);
 function sessionPullRequestState(state: string | null): string {
   if (!state) return "Linked";
   return state.charAt(0) + state.slice(1).toLowerCase();
