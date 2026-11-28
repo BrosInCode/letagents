@@ -17,6 +17,11 @@ function printable(value: unknown): string {
   return Buffer.from(value).toString("latin1").replace(/[^\x20-\x7e]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
+/** agy's words for a request that Google refused on a usage limit. */
+export function isAntigravityUsageLimitText(text: string): boolean {
+  return /RESOURCE_EXHAUSTED|QUOTA_EXHAUSTED|\bError 429\b|\(code 429\)/i.test(text);
+}
+
 /**
  * Turn the text of an error step into the owner-facing reason. agy writes
  * `Error 429, Message: …, Status: RESOURCE_EXHAUSTED` or `NOT_FOUND (code 404): …`.
@@ -25,7 +30,7 @@ function printable(value: unknown): string {
  * It keeps the words "usage limit": the daemon reads them as an account limit.
  */
 export function antigravityStepErrorMessage(text: string): string {
-  const quota = /RESOURCE_EXHAUSTED|QUOTA_EXHAUSTED|\bError 429\b|\(code 429\)/i.test(text);
+  const quota = isAntigravityUsageLimitText(text);
   const reset = /quotaResetTimeStamp\W+(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/.exec(text)?.[1] ?? null;
   if (quota) {
     return `You may have run out of Antigravity usage for this model. Antigravity answered with a usage limit error${reset ? `; the limit resets at ${new Date(reset).toISOString()}` : ""}. The turn ended without a reply.`;

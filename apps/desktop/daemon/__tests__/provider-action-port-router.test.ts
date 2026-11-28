@@ -2007,6 +2007,21 @@ test("usage reads use the acquired native connection and discard replacement res
   assert.equal(await reading, null);
 });
 
+test("the inspector detail request passes the Overview's refresh flag, and only a true one", async () => {
+  const { createDaemonControlRequestHandler } = await import("../control-request-router.js");
+  const { DAEMON_PROTOCOL_VERSION } = await import("#daemon-contract/index.js");
+  const calls: unknown[][] = [];
+  const operations = new Proxy({}, { get: (_target, name) => name === "getAgentInspectorDetail"
+    ? (...args: unknown[]) => { calls.push(args); return { ok: true }; } : undefined }) as any;
+  const handle = createDaemonControlRequestHandler({ assertCurrent: async () => {}, currentGeneration: () => 1, isHandoffScheduled: () => false }, operations);
+  const request = (params: Record<string, unknown>) => handle({ version: DAEMON_PROTOCOL_VERSION, id: "1", method: "supervisor.get_agent_inspector_detail", params } as any);
+  await request({ entry_id: "agent", room_id: "room", source_message_id: null });
+  await request({ entry_id: "agent", room_id: "room", source_message_id: "msg", refresh_account_usage: true });
+  await request({ entry_id: "agent", room_id: "room", source_message_id: null, refresh_account_usage: false });
+  assert.deepEqual(calls, [["agent", "room", null, false], ["agent", "room", "msg", true], ["agent", "room", null, false]]);
+  await assert.rejects(request({ entry_id: "agent", room_id: "room", source_message_id: null, refresh_account_usage: "yes" }));
+});
+
 test("a usage read may refresh the account's limits only when its caller asks", async () => {
   const adapter = fakeAdapter("codex", []);
   const router = new ProviderActionPortRouter({ codex: async () => adapter });

@@ -22,7 +22,7 @@
       @resolve="emit('resolve-turn-control', $event)"
     />
     </details>
-    <AgentInspectorUsage :usage="usage ?? null" :model="projection.model" :loading="runtimeControlPending && !usage" :stale="usageStale || projection.resourceFreshness !== 'fresh'" :compacting="compacting" />
+    <AgentInspectorUsage :usage="usage ?? null" :model="projection.model" :loading="runtimeControlPending && !usage" :stale="usageStale || projection.resourceFreshness !== 'fresh'" :compacting="compacting" :read-on-open="projection.provider === 'antigravity'" />
 
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-context-title">
       <div class="agent-inspector-section-heading">

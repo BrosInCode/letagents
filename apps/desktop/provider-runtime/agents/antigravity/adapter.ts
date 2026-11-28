@@ -16,6 +16,7 @@ import { AcpRpcError, acpRecord, acpString } from "./acp-connection.js";
 import { AntigravityAdapterBase } from "./adapter-base.js";
 import type { AntigravityActiveTurn, AntigravityHandle } from "./handle.js";
 import { antigravityPromptBlocks, boundedAntigravityRoomTurnPrompt, classifyAntigravityTurn } from "./turn-results.js";
+import { antigravityStepErrorMessage, isAntigravityUsageLimitText } from "./turn-errors.js";
 import { parseAntigravityQuota } from "./usage.js";
 import { antigravityPathForms, antigravityPermissionOption, type AntigravityNativePermissionRequest } from "./permissions.js";
 
@@ -234,8 +235,11 @@ export class AntigravityProviderAdapter extends AntigravityAdapterBase implement
       (error: unknown) => {
         // An error answer to this prompt is the agent's own ending of it. A closed
         // connection is not: the process ended, and recovery reports that.
-        if (error instanceof AcpRpcError) return { stopReason: null, error: error.message.slice(0, 600) || "Antigravity failed this turn." };
-        throw error;
+        if (!(error instanceof AcpRpcError)) throw error;
+        // A usage limit that agy answers here gets the same words as one in an error step.
+        const text = `${error.message} ${typeof error.data === "string" ? error.data : JSON.stringify(error.data ?? "")}`;
+        return { stopReason: null, error: isAntigravityUsageLimitText(text) ? antigravityStepErrorMessage(text)
+          : error.message.slice(0, 600) || "Antigravity failed this turn." };
       },
     );
     const stagedFiles = new Set((request.attachments ?? []).flatMap((attachment) =>

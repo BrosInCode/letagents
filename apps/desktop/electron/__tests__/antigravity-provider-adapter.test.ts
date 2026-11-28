@@ -461,7 +461,7 @@ test("a refusal stop reason and a failed prompt are settled failures", async () 
   const handle = await adapter.spawn(spawnRequest());
   const result = await adapter.runRoomTurn(handle, turnRequest) as FailedResult;
   assert.equal(result.outcome, "failed");
-  assert.match(result.error!, /RESOURCE_EXHAUSTED/);
+  assert.match(result.error!, /^You may have run out of Antigravity usage for this model\./, "a usage limit gets the owner's words");
 });
 
 test("a process that ends during a turn: the turn reads back as interrupted, and the exit is a crash", async () => {
@@ -568,11 +568,32 @@ test("usage: the context window from agy's updates, the account limits of the ag
   const kept = await adapter.readUsage(handle, { refreshAccount: false });
   assert.deepEqual(kept?.account, usage?.account);
   assert.deepEqual(quotaReads, ["/bin/agy"]);
-  // Opening the Overview again within 30 seconds of a read keeps the reading.
+  // The next Overview open reads again; another open within 30 seconds of that read keeps it.
   await adapter.readUsage(handle, { refreshAccount: true });
+  assert.deepEqual(quotaReads, ["/bin/agy", "/bin/agy"]);
   clock += 10_000;
   await adapter.readUsage(handle, { refreshAccount: true });
   assert.deepEqual(quotaReads, ["/bin/agy", "/bin/agy"]);
+  clock += 25_000;
+  await adapter.readUsage(handle, { refreshAccount: true });
+  assert.deepEqual(quotaReads, ["/bin/agy", "/bin/agy", "/bin/agy"]);
+});
+
+test("a usage limit that agy answers as a prompt error says the owner may have run out of usage", async () => {
+  const { adapter, agy } = harness();
+  agy.onPrompt = (fake, message) => {
+    fake.send({ jsonrpc: "2.0", id: message.id, error: { code: -32603, message: "Error 429, Message: Resource has been exhausted, Status: RESOURCE_EXHAUSTED" } });
+  };
+  const handle = await adapter.spawn(spawnRequest());
+  const result = await adapter.runRoomTurn(handle, turnRequest) as FailedResult;
+  assert.equal(result.outcome, "failed");
+  assert.match(result.error!, /^You may have run out of Antigravity usage for this model\. Antigravity answered with a usage limit error\./);
+  agy.onPrompt = (fake, message) => {
+    fake.send({ jsonrpc: "2.0", id: message.id, error: { code: -32603, message: "Internal error", data: "upstream closed" } });
+  };
+  const other = await adapter.runRoomTurn(handle, { ...turnRequest, inboxItemId: "inbox-2", actionId: "action-2",
+    sourceMessage: { ...turnRequest.sourceMessage, id: "msg_2" } }) as FailedResult;
+  assert.equal(other.error, "Internal error", "any other prompt error keeps agy's own words");
 });
 
 test("Ask before writes: an edit waits for the owner's answer, as a Claude-shaped request the approval path serves", async () => {

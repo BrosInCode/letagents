@@ -469,7 +469,9 @@ export class AskGiveCoordinator {
   }
 
   private async readUsage(entryId: string, roomId: string): Promise<ProviderUsage | null> {
-    // Giving needs the limits as they are now, not as an Inspector last read them.
+    // Giving and its watch need the limits as they are now, not as an Inspector last read them. Only
+    // Antigravity acts on the flag, and it cannot be given (giftPermissionProfile): if it could, this
+    // watch would run `agy -p /quota`, a call to Google outside ACP, every 30 seconds.
     const detail = await this.daemon.getAgentInspectorDetail({ entryId, roomId, refreshAccountUsage: true }).catch(() => null);
     return detail?.usage ?? null;
   }
