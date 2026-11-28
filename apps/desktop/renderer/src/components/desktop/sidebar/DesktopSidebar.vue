@@ -581,6 +581,7 @@ import {
   resolveTransitionHooks, setTransitionHooks, useTransitionState, watch, type BaseTransitionProps, type Component, type PropType, type VNode,
 } from "vue";
 import { copyTextToClipboard } from "../../../../../../../shared/ui/clipboard";
+import { sidebarRoomIsLocalOnly } from "../../../domain/sidebar-rooms";
 import { isMacPlatform } from "../../../domain/room-switcher-shortcut";
 import { desktopUpdateSidebarPresentation } from "../../../domain/desktop-update-status";
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
@@ -1052,7 +1053,7 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
 
 function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopContextMenuItem[][] {
   const notificationState = roomNotificationState(entry.roomIdentifier || "");
-  const localOnly = (entry.localOnly ?? /^local[_-]|^git-room:local:/i.test(entry.roomIdentifier || "")) || entry.gitRoom?.accessMode === "local";
+  const localOnly = sidebarRoomIsLocalOnly(entry);
   const unavailable = localOnly ? "Notification settings require a cloud room." : !props.authStatus?.authenticated ? "Sign in to manage your notifications." : "";
   const project = projectId
     ? props.projectEntries.find((candidate) => candidate.id === projectId && projectChildRooms(candidate).length)

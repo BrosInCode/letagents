@@ -653,17 +653,24 @@ test("the account activity feed asks a join card to check on a reconnect, not on
   } finally { scope.stop(); }
 });
 
-test("a room the server lists is cloud history even with a local- id; real local rooms stay local", async () => {
+test("a folder-derived local- id is cloud only when the server lists it and no local record shares the id", async () => {
   const module = await vite.ssrLoadModule("/renderer/src/composables/app/useAppSidebarMessages.ts") as {
     useAppSidebarMessages(app: unknown): {
       roomHistoryMode(id: string): "cloud" | "local";
       withRoomUnreadState(entry: Record<string, unknown>): { localOnly?: boolean };
     };
   };
+  const { sidebarRoomIsLocalOnly } = await vite.ssrLoadModule("/renderer/src/domain/sidebar-rooms.ts") as {
+    sidebarRoomIsLocalOnly(entry: Record<string, unknown>): boolean;
+  };
   const serverRoom = "local-autodownloader-7d47027e95";
+  const listedWithRecord = "local-project-0123456789";
   const accountRooms = Vue.ref([
     { roomIdentifier: serverRoom, source: "account", focusRooms: [] },
-    { roomIdentifier: "local-project-0123456789", source: "local", focusRooms: [] },
+    { roomIdentifier: listedWithRecord, source: "account", localRecord: true, focusRooms: [] },
+    { roomIdentifier: "local_5c489963-1111-2222-3333-444444444444", source: "account", focusRooms: [] },
+    { roomIdentifier: "git-room:local:abc123", source: "account", focusRooms: [] },
+    { roomIdentifier: "Local-Mixed-0123456789", source: "account", focusRooms: [] },
   ]);
   const app = {
     accountRooms, authStatus: Vue.ref(authStatus), chatStorageSettings: Vue.ref({ mode: "cloud", roomOverrides: {} }),
@@ -676,10 +683,18 @@ test("a room the server lists is cloud history even with a local- id; real local
   const sidebar = scope.run(() => module.useAppSidebarMessages(app))!;
   try {
     assert.equal(sidebar.roomHistoryMode(serverRoom), "cloud");
-    assert.equal(sidebar.withRoomUnreadState({ roomIdentifier: serverRoom }).localOnly, false);
-    for (const local of ["local-project-0123456789", "local_5c489963-1111-2222-3333-444444444444", "git-room:local:abc123", "local-unlisted-abcdef0123"]) {
+    const entry = sidebar.withRoomUnreadState({ roomIdentifier: serverRoom });
+    assert.equal(entry.localOnly, false);
+    assert.equal(sidebarRoomIsLocalOnly(entry as never), false, "the sidebar menu offers notification settings");
+    for (const local of [listedWithRecord, "local_5c489963-1111-2222-3333-444444444444", "git-room:local:abc123", "Local-Mixed-0123456789", "local-unlisted-abcdef0123"]) {
       assert.equal(sidebar.roomHistoryMode(local), "local", local);
-      assert.equal(sidebar.withRoomUnreadState({ roomIdentifier: local }).localOnly, true, local);
+      const row = sidebar.withRoomUnreadState({ roomIdentifier: local });
+      assert.equal(row.localOnly, true, local);
+      assert.equal(sidebarRoomIsLocalOnly(row as never), true, local);
     }
+    // A row that never passed the app's unread state falls back to the id prefix and the git room mode.
+    assert.equal(sidebarRoomIsLocalOnly({ roomIdentifier: "local_x" }), true);
+    assert.equal(sidebarRoomIsLocalOnly({ roomIdentifier: "github.com/a/b", gitRoom: { accessMode: "local" } }), true);
+    assert.equal(sidebarRoomIsLocalOnly({ roomIdentifier: "github.com/a/b" }), false);
   } finally { scope.stop(); }
 });

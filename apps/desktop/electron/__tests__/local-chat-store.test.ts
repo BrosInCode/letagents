@@ -917,28 +917,65 @@ test("desktop storage resolver applies app default, room overrides, and local me
   assert.equal(settings.roomOverrides.forked_room, "cloud");
 });
 
-test("a server room with a folder-derived local- id is cloud, a real local room stays local", async () => {
-  const serverRoom = "local-autodownloader-7d47027e95";
-  // No local room holds this id: the server created it, so history and sending are cloud.
-  const cloud = await resolveLocalAwareRoomStorageMode(serverRoom);
-  assert.equal(cloud.effectiveMode, "cloud");
-  assert.equal(cloud.isLocalRoom, false);
+test("a folder-derived local- id is cloud only when the server lists it and this device has no record", async () => {
+  const { rememberServerListedRooms, resetServerListedRooms } = await import("../main/rooms/server-listed-rooms.js");
+  const { fetchRoomSnapshot } = await import("../main/rooms/snapshot.js");
+  const listed = (...ids: string[]) => { resetServerListedRooms(); rememberServerListedRooms(ids.map((roomIdentifier) => ({ roomIdentifier, archived: false }))); };
+  const mode = async (id: string) => (await resolveLocalAwareRoomStorageMode(id)).effectiveMode;
+  try {
+    const serverRoom = "local-autodownloader-7d47027e95";
+    // Not listed and no record: local, as before. The snapshot path makes no join call.
+    listed();
+    assert.equal(await mode(serverRoom), "local");
+    const previousFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => { calls.push(String(input)); return new Response("{}", { status: 500 }); }) as typeof fetch;
+    try {
+      const snapshot = await fetchRoomSnapshot("local-noserver-abcdef0123");
+      assert.equal(snapshot.storage?.effectiveMode, "local");
+    } finally { globalThis.fetch = previousFetch; }
+    assert.deepEqual(calls, [], "an unlisted folder id never reaches the server");
 
-  // An archived local room that links to it by cloud id does not make it local.
-  const archived = await createLocalRoom({ displayName: "fern-river", cloudRoomIdentifier: serverRoom });
-  await setLocalRoomArchived(archived.roomIdentifier, true);
-  assert.equal((await resolveLocalAwareRoomStorageMode(serverRoom)).effectiveMode, "cloud");
+    // Listed by the server and no record: cloud, also beside an archived record that links to it.
+    listed(serverRoom);
+    assert.equal(await mode(serverRoom), "cloud");
+    const archived = await createLocalRoom({ displayName: "fern-river", cloudRoomIdentifier: serverRoom });
+    await setLocalRoomArchived(archived.roomIdentifier, true);
+    assert.equal(await mode(serverRoom), "cloud");
 
-  // A real folder-derived room exists in the local store, so it stays local (also when archived).
-  const folderRoom = "local-project-0123456789";
-  await createLocalRoom({ roomIdentifier: folderRoom, displayName: "Project" });
-  assert.equal((await resolveLocalAwareRoomStorageMode(folderRoom)).effectiveMode, "local");
-  await setLocalRoomArchived(folderRoom, true);
-  assert.equal((await resolveLocalAwareRoomStorageMode(folderRoom)).effectiveMode, "local");
+    // Listed by the server WITH a record of the same id (archived counts): local.
+    const folderRoom = "local-project-0123456789";
+    await createLocalRoom({ roomIdentifier: folderRoom, displayName: "Project" });
+    listed(folderRoom);
+    assert.equal(await mode(folderRoom), "local");
+    await setLocalRoomArchived(folderRoom, true);
+    assert.equal(await mode(folderRoom), "local");
 
-  // Other local prefixes never become cloud.
-  assert.equal((await resolveLocalAwareRoomStorageMode("local_5c489963-0000-0000-0000-000000000000")).effectiveMode, "local");
-  assert.equal((await resolveLocalAwareRoomStorageMode("local-not-derived")).effectiveMode, "local");
+    // Every other local prefix stays local, even when listed.
+    const others = ["local_5c489963-0000-0000-0000-000000000000", "git-room:local:1234567890abcdef", "local-not-derived", "Local-Mixed-0123456789"];
+    listed(...others);
+    for (const id of others) assert.equal(await mode(id), "local", id);
+  } finally { resetServerListedRooms(); }
+});
+
+test("the account room list marks a server room that also has a local record", async () => {
+  const { listDesktopAccountRooms } = await import("../main/rooms/account-rooms.js");
+  const { isServerListedRoom, resetServerListedRooms } = await import("../main/rooms/server-listed-rooms.js");
+  const recorded = "local-recorded-0123456789", plain = "local-plain-abcdef0123", archivedServer = "local-gone-aaaaaaaaaa";
+  await createLocalRoom({ roomIdentifier: recorded, displayName: "Recorded" });
+  const previousFetch = globalThis.fetch;
+  const row = (room_id: string, archived = false) => ({ room_id, display_name: room_id, role: "admin", archived });
+  globalThis.fetch = (async () => new Response(JSON.stringify({ rooms: [row(recorded), row(plain), row(archivedServer, true)] }), {
+    status: 200, headers: { "Content-Type": "application/json" },
+  })) as typeof fetch;
+  try {
+    const rooms = await listDesktopAccountRooms({ includeArchived: true });
+    const by = (id: string) => rooms.find((room) => room.roomIdentifier === id);
+    assert.equal(by(recorded)?.localRecord, true);
+    assert.equal(by(plain)?.localRecord, undefined);
+    assert.equal(isServerListedRoom(plain), true);
+    assert.equal(isServerListedRoom(archivedServer), false, "an archived server room is not listed");
+  } finally { globalThis.fetch = previousFetch; resetServerListedRooms(); }
 });
 
 test("desktop linked local rooms keep separate local and cloud identifiers", async () => {

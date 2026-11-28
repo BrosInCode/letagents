@@ -8,6 +8,12 @@ import type { ProjectGroup, RoomEntry } from "../components/desktop/types";
 import { projectRoomName } from "./project-room-name";
 import { localPathBasename } from "./local-path";
 import { repositoryRoomName } from "../../../../../shared/project-room-name.mjs";
+import { isDeviceLocalRoomId } from "../../../../../shared/local-room-identity.mjs";
+
+/** Whether a sidebar row is a device-only room. `localOnly` is the app's answer (server-aware); without it the id prefix decides. */
+export function sidebarRoomIsLocalOnly(entry: Pick<RoomEntry, "roomIdentifier" | "localOnly" | "gitRoom">): boolean {
+  return (entry.localOnly ?? isDeviceLocalRoomId(entry.roomIdentifier)) || entry.gitRoom?.accessMode === "local";
+}
 
 export type RecentRootRoom = {
   identifier: string;

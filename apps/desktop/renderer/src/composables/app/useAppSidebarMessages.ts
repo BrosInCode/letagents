@@ -15,6 +15,7 @@ import {
   roomReadMarkerKey,
   seedRoomReadMarker,
 } from "../../domain/desktop-room-read-state";
+import { isDeviceLocalRoomId } from "../../../../../../shared/local-room-identity.mjs";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { orderedSidebarChildRooms } from "../../domain/sidebar-room-order";
 import { useAccountActivity } from "../useAccountActivity";
@@ -137,9 +138,9 @@ export function useAppSidebarMessages(context: unknown) {
   // One set per room-list change; each sidebar row then checks its room in constant time.
   const localRoomKeys = computed(() => localAccountRoomKeys(accountRooms.value));
   const serverRoomKeys = computed(() => serverAccountRoomKeys(accountRooms.value));
-  /** A local-looking id is local only when the server does not list that room. */
+  /** A local-looking id is local unless it is a folder-derived id the server lists and this device has no record of. */
   function roomIsLocalOnly(identifier: string): boolean {
-    return /^local[_-]|^git-room:local:/i.test(identifier) && !serverRoomKeys.value.has(roomReadKey(identifier) ?? "");
+    return isDeviceLocalRoomId(identifier, serverRoomKeys.value.has(roomReadKey(identifier) ?? ""));
   }
   function roomUsesLocalHistory(identifier: string): boolean {
     const override = chatStorageSettings.value?.roomOverrides[identifier];

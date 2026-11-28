@@ -27,6 +27,8 @@ import {
   validateLocalRoomArtifactInputs,
 } from "./artifacts/local-store.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
+import { isDeviceLocalRoomId, isFolderDerivedLocalRoomId } from "../../../../../shared/local-room-identity.mjs";
+import { isServerListedRoom } from "./server-listed-rooms.js";
 import { withStatementCache } from "./prepared-statements.js";
 import {
   addColumnIfMissing,
@@ -314,9 +316,6 @@ export function isLocalOnlyRoomIdentifier(identifier: string | null | undefined)
   return /^local[_-]/i.test(value) || isLocalGitRoomIdentifier(value);
 }
 
-/** The id shape the desktop gives a room it derives from a project folder. */
-const FOLDER_DERIVED_LOCAL_ROOM_ID = /^local-[a-z0-9-]+-[a-f0-9]{10}$/;
-
 export function assertLocalRoomPublishable(room: DesktopLocalRoomInfo): void {
   if (room.gitRoom?.accessMode === "local" || isLocalGitRoomIdentifier(room.roomIdentifier)) {
     throw new Error("Local Git Rooms stay local until a provider is attached.");
@@ -512,6 +511,13 @@ export async function archiveLocalRoom(
   return setLocalRoomArchived(roomIdentifier, true);
 }
 
+/** Every local room id this device holds, archived included. */
+export async function listLocalRoomIdentifiers(): Promise<Set<string>> {
+  const database = await getDb();
+  const rows = database.prepare("SELECT room_id FROM local_rooms").all() as { room_id: string }[];
+  return new Set(rows.map((row) => row.room_id));
+}
+
 export async function getLocalRoomIncludingArchived(
   roomIdentifier: string,
 ): Promise<DesktopLocalRoomInfo | null> {
@@ -629,13 +635,14 @@ export async function resolveLocalAwareRoomStorageMode(
     ? await getLocalRoom(trimmedRoomIdentifier)
       || await getLocalRoomByCloudRoom(trimmedRoomIdentifier)
     : null;
-  // A folder-derived `local-<slug>-<hex>` id is local only while this device
-  // holds a local room with that id. Without one it is a server room that got
-  // the same shape (an older client joined by the derived name), so it is cloud.
-  const localIdentifier = isLocalOnlyRoomIdentifier(trimmedRoomIdentifier)
-    && !(FOLDER_DERIVED_LOCAL_ROOM_ID.test(trimmedRoomIdentifier)
-      && localRoom?.roomIdentifier !== trimmedRoomIdentifier
-      && !await getLocalRoomIncludingArchived(trimmedRoomIdentifier));
+  // A folder-derived `local-<slug>-<hex>` id is cloud only when the server
+  // listed it for this account AND this device holds no local record with that
+  // exact id (archived counts). Anything else stays local, with no network call.
+  const cloudProven = isFolderDerivedLocalRoomId(trimmedRoomIdentifier)
+    && isServerListedRoom(trimmedRoomIdentifier)
+    && localRoom?.roomIdentifier !== trimmedRoomIdentifier
+    && !await getLocalRoomIncludingArchived(trimmedRoomIdentifier);
+  const localIdentifier = isDeviceLocalRoomId(trimmedRoomIdentifier, cloudProven);
   const localOnlyRoom = Boolean(localRoom && !localRoom.cloudRoomIdentifier);
   const requestedIdentifier = resolved.roomIdentifier;
   const requestedLocalRoom = Boolean(

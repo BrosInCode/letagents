@@ -1181,6 +1181,8 @@ export interface DesktopAccountRoomEntry {
   latestMessageAt: string | null;
   gitRoom: DesktopGitRoomInfo | null;
   focusRooms: DesktopAccountFocusRoomEntry[];
+  /** A server entry whose exact id this device also holds as a local record (archived counts). */
+  localRecord?: boolean;
 }
 
 export interface DesktopAccountRoomActionResult {

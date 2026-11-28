@@ -34,12 +34,14 @@ export function localAccountRoomKeys(accountRooms: readonly Pick<DesktopAccountR
 }
 
 /**
- * The read keys of every room the server lists for the account (not a device
- * only entry). A server room is cloud even when its id starts with `local-`.
+ * The read keys of the rooms that are cloud for sure: the server lists them
+ * (active, not a device-only entry) and this device holds no local record with
+ * the same id. It is the `cloudProven` input of `isDeviceLocalRoomId`.
  */
-export function serverAccountRoomKeys(accountRooms: readonly Pick<DesktopAccountRoomEntry, "roomIdentifier" | "source" | "focusRooms">[]): Set<string> {
+export function serverAccountRoomKeys(accountRooms: readonly (Pick<DesktopAccountRoomEntry, "roomIdentifier" | "source" | "focusRooms"> & { archived?: boolean; localRecord?: boolean })[]): Set<string> {
   const keys = new Set<string>();
   for (const room of accountRooms) {
+    if (room.localRecord || room.archived) continue;
     for (const entry of [room, ...room.focusRooms]) {
       const key = entry.source === "local" ? null : roomReadKey(entry.roomIdentifier);
       if (key) keys.add(key);

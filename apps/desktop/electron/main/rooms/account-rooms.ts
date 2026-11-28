@@ -18,11 +18,13 @@ import {
   getLocalRoomByCloudRoomIncludingArchived,
   getLocalRoomIncludingArchived,
   listLocalRoomEntries,
+  listLocalRoomIdentifiers,
   setLocalRoomArchived,
   setLocalRoomPinned,
 } from "./local-store.js";
 import { mergeDesktopAccountRoomEntries } from "./account-room-list.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
+import { rememberServerListedRooms } from "./server-listed-rooms.js";
 
 type AccountLocalRoom = {
   roomIdentifier: string;
@@ -191,11 +193,14 @@ async function fetchDesktopAccountRooms(input: {
   params.set("limit", String(Math.max(1, Math.min(input.limit, 100))));
   params.set("include_archived", input.includeArchived ? "true" : "false");
 
+  let signedOut = false;
   const response = await apiFetch<{ rooms?: unknown[] }>(
     `/account/rooms?${params}`,
   ).catch((error) => {
-    if (error instanceof DesktopApiError && error.status === 401)
+    if (error instanceof DesktopApiError && error.status === 401) {
+      signedOut = true;
       return { rooms: [] };
+    }
     throw error;
   });
   const cloudRooms = (response.rooms || [])
@@ -209,6 +214,11 @@ async function fetchDesktopAccountRooms(input: {
   // display cloud entries verbatim (no local-store overlay). Only rooms with no
   // server copy — local-only rooms not present in the cloud list — are appended
   // from the local store.
+  rememberServerListedRooms(cloudRooms, { signedOut });
+  const localRecords = await listLocalRoomIdentifiers();
+  for (const room of cloudRooms) {
+    if (localRecords.has(room.roomIdentifier)) room.localRecord = true;
+  }
   const localRooms = await listLocalRoomEntries({ linkedIdentity: "cloud" });
   const seen = new Set(cloudRooms.map((room) => room.roomIdentifier));
   const visibleLocalRooms: DesktopAccountRoomEntry[] = [];

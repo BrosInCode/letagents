@@ -344,12 +344,14 @@ it("local account rooms are found by read key, focus rooms included, in one pass
   assert.equal(reads, 6);
 });
 
-it("server account rooms are found by read key, device-only entries left out", async () => {
+it("server account rooms are cloud-proven by read key: device-only, archived and same-id-record entries left out", async () => {
   const { serverAccountRoomKeys } = await import("../src/domain/desktop-room-read-state");
-  const entry = (roomIdentifier: string, source: string | null, focusRooms: unknown[] = []) => ({ roomIdentifier, source, focusRooms });
+  const entry = (roomIdentifier: string, source: string | null, extra: Record<string, unknown> = {}, focusRooms: unknown[] = []) => ({ roomIdentifier, source, focusRooms, ...extra });
   const keys = serverAccountRoomKeys([
-    entry("Local-Autodownloader-7d47027e95", "account", [entry("focus_1", null), entry("focus_2", "local")]),
+    entry("Local-Autodownloader-7d47027e95", "account", {}, [entry("focus_1", null), entry("focus_2", "local")]),
     entry("local_5c489963", "local"),
+    entry("local-recorded-0123456789", "account", { localRecord: true }),
+    entry("local-archived-0123456789", "account", { archived: true }),
   ] as never);
   assert.deepEqual([...keys].sort(), ["focus_1", "local-autodownloader-7d47027e95"]);
 });
