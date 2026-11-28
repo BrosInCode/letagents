@@ -28,7 +28,9 @@ import {
 } from "./artifacts/local-store.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
 import { isDeviceLocalRoomId, isFolderDerivedLocalRoomId } from "../../../../../shared/local-room-identity.mjs";
-import { isServerListedRoom } from "./server-listed-rooms.js";
+import { isServerListedRoom, waitForFirstServerList } from "./server-listed-rooms.js";
+import { findProjectBinding } from "../../project-bindings.js";
+import { listProjectBindings } from "../project-bindings-store.js";
 import { withStatementCache } from "./prepared-statements.js";
 import {
   addColumnIfMissing,
@@ -511,6 +513,33 @@ export async function archiveLocalRoom(
   return setLocalRoomArchived(roomIdentifier, true);
 }
 
+/**
+ * A stub is a local record the app made by itself when it opened a server room
+ * whose id looks local: its name is its id, and it has no messages, no tasks,
+ * no git room and no project folder binding.
+ */
+async function isStubLocalRoom(room: DesktopLocalRoomInfo): Promise<boolean> {
+  if (room.displayName !== room.roomIdentifier || room.gitRoom || room.cloudRoomIdentifier) return false;
+  const database = await getDb();
+  for (const table of ["local_chat_messages", "local_tasks"]) {
+    try {
+      if (database.prepare(`SELECT 1 FROM ${table} WHERE room_id = ? LIMIT 1`).get(room.roomIdentifier)) return false;
+    } catch {
+      // The table is created on first use; a missing table holds nothing.
+    }
+  }
+  return !findProjectBinding(await listProjectBindings(), { roomIdentifier: room.roomIdentifier });
+}
+
+/**
+ * Whether this device holds a real local record with exactly this id (archived
+ * counts). A stub does not count. The one place main and the account list ask.
+ */
+export async function localRecordBlocksCloud(roomIdentifier: string): Promise<boolean> {
+  const record = await getLocalRoomIncludingArchived(roomIdentifier);
+  return Boolean(record) && !await isStubLocalRoom(record!);
+}
+
 /** Every local room id this device holds, archived included. */
 export async function listLocalRoomIdentifiers(): Promise<Set<string>> {
   const database = await getDb();
@@ -631,18 +660,22 @@ export async function resolveLocalAwareRoomStorageMode(
 ): Promise<DesktopRoomStorageState> {
   const resolved = await resolveRoomStorageMode(roomIdentifier);
   const trimmedRoomIdentifier = resolved.roomIdentifier?.trim() || "";
-  const localRoom = trimmedRoomIdentifier
+  const foundLocalRoom = trimmedRoomIdentifier
     ? await getLocalRoom(trimmedRoomIdentifier)
       || await getLocalRoomByCloudRoom(trimmedRoomIdentifier)
     : null;
   // A folder-derived `local-<slug>-<hex>` id is cloud only when the server
   // listed it for this account AND this device holds no local record with that
   // exact id (archived counts). Anything else stays local, with no network call.
+  // The first read after a start waits once for the server's first list, so it
+  // does not decide "local" (and store a record) for a room the server owns.
+  if (isFolderDerivedLocalRoomId(trimmedRoomIdentifier)) await waitForFirstServerList();
   const cloudProven = isFolderDerivedLocalRoomId(trimmedRoomIdentifier)
     && isServerListedRoom(trimmedRoomIdentifier)
-    && localRoom?.roomIdentifier !== trimmedRoomIdentifier
-    && !await getLocalRoomIncludingArchived(trimmedRoomIdentifier);
+    && !await localRecordBlocksCloud(trimmedRoomIdentifier);
   const localIdentifier = isDeviceLocalRoomId(trimmedRoomIdentifier, cloudProven);
+  // A stub record of a server room is ignored: it is not the room's local home.
+  const localRoom = cloudProven && foundLocalRoom?.roomIdentifier === trimmedRoomIdentifier ? null : foundLocalRoom;
   const localOnlyRoom = Boolean(localRoom && !localRoom.cloudRoomIdentifier);
   const requestedIdentifier = resolved.roomIdentifier;
   const requestedLocalRoom = Boolean(

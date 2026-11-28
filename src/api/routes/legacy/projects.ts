@@ -37,7 +37,7 @@ import {
 } from "../../rooms/formatting.js";
 import { RoomDeletedError } from "../../db/utils.js";
 import { replyRoomDeleted } from "../../rooms/resolution.js";
-import { isDeviceLocalRoomIdShape, isReservedMainRoomCreationId } from "../../rooms/room-nature.js";
+import { isDeviceLocalRoomIdShape, LOCAL_ROOM_NAME_REFUSAL, isReservedMainRoomCreationId } from "../../rooms/room-nature.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import { isMessageSenderWithinBounds } from "../../../../shared/message-contracts.mjs";
 
@@ -254,7 +254,7 @@ export function registerLegacyProjectRoutes(
     let project: Project;
     try {
       if (isDeviceLocalRoomIdShape(roomId) && !(await getProjectById(roomId))) {
-        res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+        res.status(404).json({ error: LOCAL_ROOM_NAME_REFUSAL, code: "ROOM_NOT_FOUND" });
         return;
       }
       ({ room: project, created } = await getOrCreateCanonicalRoom(roomId));

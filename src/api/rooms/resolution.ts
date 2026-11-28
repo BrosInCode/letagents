@@ -11,7 +11,7 @@ import {
   type Project,
 } from "../db.js";
 import { getOrCreateGitHubRefRoomFromLocator } from "../github/git-room-routing.js";
-import { classifyRoomLocator, isDeviceLocalRoomIdShape, isFocusRoomIdShape, isJoinCodeShape, parseFocusRoomLocator } from "./room-nature.js";
+import { classifyRoomLocator, isDeviceLocalRoomIdShape, LOCAL_ROOM_NAME_REFUSAL, isFocusRoomIdShape, isJoinCodeShape, parseFocusRoomLocator } from "./room-nature.js";
 import { normalizeRoomId } from "./routing.js";
 import type { ResolvedRoomRequest } from "./request-room.js";
 
@@ -110,7 +110,7 @@ async function resolveLiveRoomOrReply(
     if (isDeviceLocalRoomIdShape(roomId)) {
       const existing = await getProjectById(roomId);
       if (!existing) {
-        res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+        res.status(404).json({ error: LOCAL_ROOM_NAME_REFUSAL, code: "ROOM_NOT_FOUND" });
         return null;
       }
       return existing;

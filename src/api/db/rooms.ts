@@ -1,7 +1,7 @@
 import { asc, eq, inArray, sql } from "drizzle-orm";
 
 import { defaultRoomDisplayName, generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
-import { getRoomNature, isDeviceLocalRoomIdShape, isJoinCodeShape, isReservedMainRoomCreationId, originForNewMainRoom, recordStoredRoomOrigin } from "../rooms/room-nature.js";
+import { getRoomNature, isDeviceLocalRoomIdShape, isJoinCodeShape, LOCAL_ROOM_NAME_REFUSAL, isReservedMainRoomCreationId, originForNewMainRoom, recordStoredRoomOrigin } from "../rooms/room-nature.js";
 import { normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
 import { findFocusRoomRowByKey } from "./focus-room-lookup.js";
@@ -117,7 +117,7 @@ export async function getOrCreateCanonicalRoom(
     return { room: existing, created: false };
   }
   if (isDeviceLocalRoomIdShape(canonicalId)) {
-    throw new Error(`'${canonicalId}' is in the device-local room namespace and cannot be created on the server`);
+    throw new Error(`'${canonicalId}': ${LOCAL_ROOM_NAME_REFUSAL}`);
   }
 
   const created_at = new Date().toISOString();

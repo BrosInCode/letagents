@@ -1,4 +1,5 @@
 import { roomThemeId, type RoomCompanyAppearance } from "../../../../../shared/room-themes.mjs";
+import { resetServerListedRooms } from "./server-listed-rooms.js";
 import type {
   DesktopFocusActivityScope,
   DesktopFocusGitHubEventRouting,
@@ -271,6 +272,9 @@ export function mapDesktopRoomInfoPayload(
 }
 
 export function clearJoinedRoomInfoCache(): void {
+  // Every sign-in, sign-out and account switch lands here; the server room list
+  // belongs to one account, so it starts over too.
+  resetServerListedRooms();
   invalidatePendingJoinedRoomInfo();
   joinedRoomInfoCache.clear();
 }

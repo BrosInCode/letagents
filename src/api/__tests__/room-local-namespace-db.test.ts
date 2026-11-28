@@ -36,12 +36,13 @@ test("the device-local id shape is local- or local_, any case", () => {
 
 test("a request cannot create a local- or local_ room, and nothing is stored", options, async () => {
   for (const id of [`local-folder-${suffix}`, `Local_${suffix}`]) {
-    await assert.rejects(() => db!.getOrCreateCanonicalRoom(id), /device-local room namespace/);
+    await assert.rejects(() => db!.getOrCreateCanonicalRoom(id), /kept for rooms on one device/);
     assert.equal(await db!.getProjectById(id), undefined);
 
     const res = fakeResponse();
     assert.equal(await resolution!.resolveRoomOrReply(id, res, { allowCreate: true }), null);
     assert.equal(res.statusCode, 404);
+    assert.match(String((res as unknown as { body: { error: string } }).body.error), /kept for rooms on one device/);
     assert.equal(await db!.getProjectById(id), undefined);
   }
 });

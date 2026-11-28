@@ -918,7 +918,8 @@ test("desktop storage resolver applies app default, room overrides, and local me
 });
 
 test("a folder-derived local- id is cloud only when the server lists it and this device has no record", async () => {
-  const { rememberServerListedRooms, resetServerListedRooms } = await import("../main/rooms/server-listed-rooms.js");
+  const { rememberServerListedRooms, resetServerListedRooms, setServerListWaitGate } = await import("../main/rooms/server-listed-rooms.js");
+  setServerListWaitGate(async () => false);
   const { fetchRoomSnapshot } = await import("../main/rooms/snapshot.js");
   const listed = (...ids: string[]) => { resetServerListedRooms(); rememberServerListedRooms(ids.map((roomIdentifier) => ({ roomIdentifier, archived: false }))); };
   const mode = async (id: string) => (await resolveLocalAwareRoomStorageMode(id)).effectiveMode;
@@ -961,11 +962,12 @@ test("a folder-derived local- id is cloud only when the server lists it and this
 test("the account room list marks a server room that also has a local record", async () => {
   const { listDesktopAccountRooms } = await import("../main/rooms/account-rooms.js");
   const { isServerListedRoom, resetServerListedRooms } = await import("../main/rooms/server-listed-rooms.js");
-  const recorded = "local-recorded-0123456789", plain = "local-plain-abcdef0123", archivedServer = "local-gone-aaaaaaaaaa";
+  const recorded = "local-recorded-0123456789", plain = "local-plain-abcdef0123", archivedServer = "local-gone-aaaaaaaaaa", stubbed = "local-stub-0123456789";
   await createLocalRoom({ roomIdentifier: recorded, displayName: "Recorded" });
+  await createLocalRoom({ roomIdentifier: stubbed, displayName: stubbed });
   const previousFetch = globalThis.fetch;
   const row = (room_id: string, archived = false) => ({ room_id, display_name: room_id, role: "admin", archived });
-  globalThis.fetch = (async () => new Response(JSON.stringify({ rooms: [row(recorded), row(plain), row(archivedServer, true)] }), {
+  globalThis.fetch = (async () => new Response(JSON.stringify({ rooms: [row(recorded), row(plain), row(archivedServer, true), row(stubbed)] }), {
     status: 200, headers: { "Content-Type": "application/json" },
   })) as typeof fetch;
   try {
@@ -973,9 +975,91 @@ test("the account room list marks a server room that also has a local record", a
     const by = (id: string) => rooms.find((room) => room.roomIdentifier === id);
     assert.equal(by(recorded)?.localRecord, true);
     assert.equal(by(plain)?.localRecord, undefined);
+    assert.equal(by(stubbed)?.localRecord, undefined, "a stub record does not count");
     assert.equal(isServerListedRoom(plain), true);
     assert.equal(isServerListedRoom(archivedServer), false, "an archived server room is not listed");
   } finally { globalThis.fetch = previousFetch; resetServerListedRooms(); }
+});
+
+test("cold start: the first read of a server-listed folder id waits for the list and stores no record", async () => {
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  const { fetchRoomSnapshot } = await import("../main/rooms/snapshot.js");
+  const id = "local-coldstart-aaaaaaaaaa";
+  servers.setServerListWaitGate(async () => true);
+  servers.resetServerListedRooms();
+  const previousFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => { calls.push(String(input)); return new Response("{}", { status: 500 }); }) as typeof fetch;
+  try {
+    // The room read starts before the account list answered.
+    const read = fetchRoomSnapshot(id);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(await getLocalRoomIncludingArchived(id), null, "no record while the list is unknown");
+    assert.equal(calls.length, 0, "and no server call either");
+    servers.rememberServerListedRooms([{ roomIdentifier: id, archived: false }]);
+    const snapshot = await read;
+    assert.equal(snapshot.storage?.effectiveMode ?? "cloud", "cloud");
+    assert.equal(await getLocalRoomIncludingArchived(id), null, "the read stored no local record");
+    assert.ok(calls.some((call) => call.includes("/join")), "the room is read from the server");
+  } finally {
+    globalThis.fetch = previousFetch;
+    servers.resetServerListedRooms();
+    servers.setServerListWaitGate(async () => false);
+  }
+});
+
+test("the first-list wait is bounded, happens once, and skips a signed-out start", async () => {
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  servers.resetServerListedRooms();
+  servers.setServerListWaitGate(async () => false);
+  let started = Date.now();
+  await servers.waitForFirstServerList(2000);
+  assert.ok(Date.now() - started < 500, "no sign-in: no wait");
+  servers.setServerListWaitGate(async () => true);
+  started = Date.now();
+  await servers.waitForFirstServerList(40);
+  assert.ok(Date.now() - started >= 30, "waits up to the limit");
+  started = Date.now();
+  await servers.waitForFirstServerList(2000);
+  assert.ok(Date.now() - started < 500, "an earlier timeout is not waited out again");
+  servers.resetServerListedRooms();
+  servers.setServerListWaitGate(async () => false);
+});
+
+test("a stub same-id record is ignored when the server lists the id; a real record is kept", async () => {
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  const stub = "local-fbrf-186988c484", withMessage = "local-withmsg-0123456789", withTask = "local-withtask-0123456789";
+  servers.setServerListWaitGate(async () => false);
+  await createLocalRoom({ roomIdentifier: stub, displayName: stub });
+  await createLocalRoom({ roomIdentifier: withMessage, displayName: withMessage });
+  await addLocalChatMessage(withMessage, { sender: "Emmy", text: "real history", source: "human" });
+  await createLocalRoom({ roomIdentifier: withTask, displayName: withTask });
+  await addLocalTask(withTask, { title: "real task" });
+  try {
+    servers.rememberServerListedRooms([stub, withMessage, withTask].map((roomIdentifier) => ({ roomIdentifier, archived: false })));
+    const mode = async (id: string) => (await resolveLocalAwareRoomStorageMode(id)).effectiveMode;
+    assert.equal(await mode(stub), "cloud");
+    assert.equal(await mode(withMessage), "local");
+    assert.equal(await mode(withTask), "local");
+    // Not listed: even a stub stays local.
+    servers.rememberServerListedRooms([]);
+    assert.equal(await mode(stub), "local");
+  } finally { servers.resetServerListedRooms(); }
+});
+
+test("the server room list is replaced on each fetch and reset on an account change", async () => {
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  const { clearJoinedRoomInfoCache } = await import("../main/rooms/room-info.js");
+  const entry = (roomIdentifier: string, archived = false) => ({ roomIdentifier, archived });
+  servers.rememberServerListedRooms([entry("local-accounta-cccccccccc")]);
+  assert.equal(servers.isServerListedRoom("local-accounta-cccccccccc"), true);
+  servers.rememberServerListedRooms([entry("local-accountb-dddddddddd"), entry("local-gone-eeeeeeeeee", true)]);
+  assert.equal(servers.isServerListedRoom("local-accounta-cccccccccc"), false, "a fetch replaces the list");
+  assert.equal(servers.isServerListedRoom("local-accountb-dddddddddd"), true);
+  assert.equal(servers.isServerListedRoom("local-gone-eeeeeeeeee"), false, "archived is not listed");
+  clearJoinedRoomInfoCache();
+  assert.equal(servers.isServerListedRoom("local-accountb-dddddddddd"), false, "sign-in, sign-out and account switch reset it");
+  assert.equal((await resolveLocalAwareRoomStorageMode("local-accounta-cccccccccc")).effectiveMode, "local");
 });
 
 test("desktop linked local rooms keep separate local and cloud identifiers", async () => {

@@ -24,7 +24,7 @@ Create a new invite room. Returns the room ID and join code.
 
 ### `join_room`
 
-Join a named room. Creates the room if it doesn't exist. Use this for repo-based room joining.
+Join a named room. Creates the room if it doesn't exist, except names that start with local- or local_ (kept for rooms on one device). Use this for repo-based room joining.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

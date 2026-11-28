@@ -19,6 +19,7 @@ import {
   getLocalRoomIncludingArchived,
   listLocalRoomEntries,
   listLocalRoomIdentifiers,
+  localRecordBlocksCloud,
   setLocalRoomArchived,
   setLocalRoomPinned,
 } from "./local-store.js";
@@ -217,7 +218,7 @@ async function fetchDesktopAccountRooms(input: {
   rememberServerListedRooms(cloudRooms, { signedOut });
   const localRecords = await listLocalRoomIdentifiers();
   for (const room of cloudRooms) {
-    if (localRecords.has(room.roomIdentifier)) room.localRecord = true;
+    if (localRecords.has(room.roomIdentifier) && await localRecordBlocksCloud(room.roomIdentifier)) room.localRecord = true;
   }
   const localRooms = await listLocalRoomEntries({ linkedIdentity: "cloud" });
   const seen = new Set(cloudRooms.map((room) => room.roomIdentifier));
