@@ -67,7 +67,7 @@
     :data-sidebar-resizing="isSidebarResizing"
     :style="[desktopShellStyle, roomTheme.css.value]"
     :data-room-theme="roomTheme.effective.value"
-    :inert="roomArrival === 'waiting'"
+    :inert="roomArrival === 'waiting' || firstLoadVeil"
     data-testid="desktop-shell"
     data-app-texture
   >
@@ -865,6 +865,8 @@ const roomLoaderHandOff = provideRoomLoaderHandOff(() => roomShellShown.value);
 // Back and forward through the places opened in this window (the sidebar's ‹ ›, ⌘[ and ⌘]).
 useEntryHistory({
   activeEntry,
+  // The restored room replaces a placeholder at start-up; that is no step back.
+  recording: () => firstLoadDone.value,
   open: handleSidebarEntrySelected,
   // A room that was left or deleted is skipped; other places always exist.
   resolve: (entry) => entry.type !== "room" ? entry
@@ -880,6 +882,10 @@ const firstLoadVeil = computed(() => !firstLoadDone.value && !roomArrival.value)
 watchEffect(() => {
   if (!firstLoadDone.value && !showFirstRunSplash.value && (showFirstRunGate.value || showSignedOutGate.value)) firstLoadDone.value = true;
 });
+// A very slow start (a cold Git read outside every timeout) must not keep the
+// whole window covered: after 8 s the app shows with its own room loader.
+const firstLoadVeilLimit = window.setTimeout(() => { firstLoadDone.value = true; }, 8_000);
+watch(firstLoadDone, (done) => { if (done) window.clearTimeout(firstLoadVeilLimit); });
 // App's setup runs before the startup load begins: "nothing loading" counts as
 // done only once a load has been seen.
 let firstLoadSeen = false;

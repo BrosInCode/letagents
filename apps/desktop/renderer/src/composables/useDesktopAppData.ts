@@ -542,17 +542,22 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       });
     }
     const snapshot = await getRoomSnapshot(input.roomIdentifier);
+    const generation = options.sessionGeneration.value;
     const repoStatus = await settleWithin(statusRequest, pendingStatus ? 0 : repoStatusGraceMs);
     if (repoStatus === undefined) {
       void statusRequest.then((late) => {
-        if (!late) return;
+        if (!late || !sessionIsCurrent(generation)) return;
         const rootRoom = normalizeRoomIdentifier(options.selectedRootRoomIdentifier.value);
         if (rootRoom && rootRoom === normalizeRoomIdentifier(snapshot.roomIdentifier)) options.repoStatus.value = late;
       });
     }
+    // While a read is still running, the status on screen stays if it is for
+    // this folder: clearing it hid the project and branch until the answer came.
+    const shownStatus = options.repoStatus.value;
+    const keptStatus = shownStatus && input.rootPath && shownStatus.rootPath === input.rootPath ? shownStatus : null;
     return {
       snapshot,
-      repoStatus: repoStatus ?? null,
+      repoStatus: repoStatus ?? keptStatus,
       openedRoom: null,
     };
   }

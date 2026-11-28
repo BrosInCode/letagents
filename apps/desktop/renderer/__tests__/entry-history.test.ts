@@ -7,13 +7,14 @@ import { useEntryHistory } from "../src/composables/useEntryHistory";
 
 const place = (id: string) => ({ id, type: "room", title: id } as unknown as SidebarEntry);
 
-function harness(gone: string[] = []) {
+function harness(gone: string[] = [], recording?: () => boolean) {
   const activeEntry = ref<SidebarEntry>(place("welcome"));
   const scope = effectScope();
   const history = scope.run(() => useEntryHistory({
     activeEntry,
     open: (entry) => { activeEntry.value = entry; },
     resolve: (entry) => (gone.includes(entry.id) ? null : entry),
+    recording,
   }))!;
   return { activeEntry, history, stop: () => scope.stop() };
 }
@@ -52,5 +53,17 @@ test("a place that is gone is skipped", () => {
   activeEntry.value = place("pearl-leaf");
   history.goBack();
   assert.equal(activeEntry.value.id, "welcome", "the deleted room is passed over");
+  stop();
+});
+
+test("the start-up switch from a placeholder to the restored room is no step back", () => {
+  let started = false;
+  const { activeEntry, history, stop } = harness([], () => started);
+  activeEntry.value = place("restored-room");
+  assert.equal(history.canGoBack.value, false);
+  started = true;
+  activeEntry.value = place("pearl-leaf");
+  history.goBack();
+  assert.equal(activeEntry.value.id, "restored-room");
   stop();
 });

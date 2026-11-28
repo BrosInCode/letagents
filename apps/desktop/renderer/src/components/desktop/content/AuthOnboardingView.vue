@@ -270,7 +270,8 @@ const cardState = computed(() =>
 // the screen jumping back to the first-load ink and then to the card again.
 const settledState = ref<AuthCardState | null>(null);
 watch(cardState, (state) => { if (state !== "loading") settledState.value = state; }, { immediate: true });
-watch(() => props.access.roomIdentifier, () => {
+// Another room (by id, or by name while no snapshot names it yet) starts fresh.
+watch([() => props.access.roomIdentifier, () => props.roomLabel], () => {
   settledState.value = cardState.value === "loading" ? null : cardState.value;
 });
 const shownState = computed<AuthCardState>(() =>

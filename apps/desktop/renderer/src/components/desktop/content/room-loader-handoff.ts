@@ -23,6 +23,8 @@ export function provideRoomLoaderHandOff(arriving: () => boolean) {
     beforeLeave(element: Element): void {
       if (!arriving() || !(element instanceof HTMLElement)) return;
       const box = element.getBoundingClientRect();
+      // Keep a higher layer it already has (the first-load veil sits over everything).
+      const ownLayer = Number.parseInt(getComputedStyle(element).zIndex, 10);
       Object.assign(element.style, {
         position: "fixed",
         top: `${box.top}px`,
@@ -30,7 +32,7 @@ export function provideRoomLoaderHandOff(arriving: () => boolean) {
         width: `${box.width}px`,
         height: `${box.height}px`,
         margin: "0",
-        zIndex: "40",
+        zIndex: String(Number.isFinite(ownLayer) && ownLayer > 40 ? ownLayer : 40),
         pointerEvents: "none",
       });
       leaving.value = true;

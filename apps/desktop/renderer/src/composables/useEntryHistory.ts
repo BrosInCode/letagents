@@ -35,13 +35,15 @@ export function useEntryHistory(options: {
   open: (entry: SidebarEntry) => void;
   /** The entry as it is now, or null when it no longer exists. */
   resolve: (entry: SidebarEntry) => SidebarEntry | null;
+  /** False while start-up settles on the first place (default: always true). */
+  recording?: () => boolean;
 }) {
   const back = ref<SidebarEntry[]>([]);
   const forward = ref<SidebarEntry[]>([]);
   let travelling = false;
 
   watch(options.activeEntry, (entry, previous) => {
-    if (travelling || !previous || entry.id === previous.id) return;
+    if (travelling || !previous || entry.id === previous.id || options.recording?.() === false) return;
     back.value = [...back.value, previous].slice(-HISTORY_LIMIT);
     forward.value = [];
   }, { flush: "sync" });
