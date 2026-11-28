@@ -28,7 +28,7 @@ import {
 } from "./artifacts/local-store.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
 import { isDeviceLocalRoomId, isFolderDerivedLocalRoomId } from "../../../../../shared/local-room-identity.mjs";
-import { isServerListedRoom, waitForFirstServerList } from "./server-listed-rooms.js";
+import { isServerListPending, isServerListedRoom, waitForFirstServerList } from "./server-listed-rooms.js";
 import { findProjectBinding } from "../../project-bindings.js";
 import { listProjectBindings } from "../project-bindings-store.js";
 import { withStatementCache } from "./prepared-statements.js";
@@ -540,6 +540,17 @@ export async function localRecordBlocksCloud(roomIdentifier: string): Promise<bo
   return Boolean(record) && !await isStubLocalRoom(record!);
 }
 
+/**
+ * A folder-derived id with no real local record while the signed-in account's
+ * first server list has not answered: it cannot be decided yet, so the read
+ * path must not create a local record for it.
+ */
+export async function folderRoomAwaitsServerList(roomIdentifier: string): Promise<boolean> {
+  const id = roomIdentifier.trim();
+  return isFolderDerivedLocalRoomId(id) && !isServerListedRoom(id)
+    && await isServerListPending() && !await localRecordBlocksCloud(id);
+}
+
 /** Every local room id this device holds, archived included. */
 export async function listLocalRoomIdentifiers(): Promise<Set<string>> {
   const database = await getDb();
@@ -667,12 +678,14 @@ export async function resolveLocalAwareRoomStorageMode(
   // A folder-derived `local-<slug>-<hex>` id is cloud only when the server
   // listed it for this account AND this device holds no local record with that
   // exact id (archived counts). Anything else stays local, with no network call.
-  // The first read after a start waits once for the server's first list, so it
-  // does not decide "local" (and store a record) for a room the server owns.
-  if (isFolderDerivedLocalRoomId(trimmedRoomIdentifier)) await waitForFirstServerList();
-  const cloudProven = isFolderDerivedLocalRoomId(trimmedRoomIdentifier)
-    && isServerListedRoom(trimmedRoomIdentifier)
-    && !await localRecordBlocksCloud(trimmedRoomIdentifier);
+  // A real local record means local, whatever the list says, and nothing waits.
+  // Otherwise the first read after a start waits once for the server's first
+  // list, so it does not decide "local" (and store a record) for a room the
+  // server owns.
+  const folderDerived = isFolderDerivedLocalRoomId(trimmedRoomIdentifier);
+  const blockedByRecord = folderDerived && await localRecordBlocksCloud(trimmedRoomIdentifier);
+  if (folderDerived && !blockedByRecord) await waitForFirstServerList();
+  const cloudProven = folderDerived && !blockedByRecord && isServerListedRoom(trimmedRoomIdentifier);
   const localIdentifier = isDeviceLocalRoomId(trimmedRoomIdentifier, cloudProven);
   // A stub record of a server room is ignored: it is not the room's local home.
   const localRoom = cloudProven && foundLocalRoom?.roomIdentifier === trimmedRoomIdentifier ? null : foundLocalRoom;

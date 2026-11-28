@@ -25,7 +25,8 @@ import {
 } from "./local-store.js";
 import { mergeDesktopAccountRoomEntries } from "./account-room-list.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
-import { rememberServerListedRooms } from "./server-listed-rooms.js";
+import { isFolderDerivedLocalRoomId } from "../../../../../shared/local-room-identity.mjs";
+import { beginServerListFetch, isServerListedRoom, noteServerListFailed, rememberServerListedRooms } from "./server-listed-rooms.js";
 
 type AccountLocalRoom = {
   roomIdentifier: string;
@@ -195,6 +196,7 @@ async function fetchDesktopAccountRooms(input: {
   params.set("include_archived", input.includeArchived ? "true" : "false");
 
   let signedOut = false;
+  const listGeneration = beginServerListFetch();
   const response = await apiFetch<{ rooms?: unknown[] }>(
     `/account/rooms?${params}`,
   ).catch((error) => {
@@ -202,6 +204,7 @@ async function fetchDesktopAccountRooms(input: {
       signedOut = true;
       return { rooms: [] };
     }
+    noteServerListFailed(listGeneration);
     throw error;
   });
   const cloudRooms = (response.rooms || [])
@@ -215,7 +218,11 @@ async function fetchDesktopAccountRooms(input: {
   // display cloud entries verbatim (no local-store overlay). Only rooms with no
   // server copy — local-only rooms not present in the cloud list — are appended
   // from the local store.
-  rememberServerListedRooms(cloudRooms, { signedOut });
+  rememberServerListedRooms(cloudRooms, {
+    signedOut,
+    generation: listGeneration,
+    fullPage: (response.rooms || []).length >= Math.max(1, Math.min(input.limit, 100)),
+  });
   const localRecords = await listLocalRoomIdentifiers();
   for (const room of cloudRooms) {
     if (localRecords.has(room.roomIdentifier) && await localRecordBlocksCloud(room.roomIdentifier)) room.localRecord = true;
@@ -273,7 +280,14 @@ export async function updateDesktopAccountRoom(
   if (updates.pinned === undefined && updates.archived === undefined) {
     throw new Error("No supported room update was requested.");
   }
-  const exactLocalRoom = await getLocalRoomIncludingArchived(roomIdentifier);
+  const foundExactLocalRoom = await getLocalRoomIncludingArchived(roomIdentifier);
+  // A stub record of a server room is not this room's local home.
+  const exactLocalRoom = foundExactLocalRoom
+    && isFolderDerivedLocalRoomId(roomIdentifier)
+    && isServerListedRoom(roomIdentifier)
+    && !await localRecordBlocksCloud(roomIdentifier)
+    ? null
+    : foundExactLocalRoom;
   const linkedLocalRoom =
     exactLocalRoom ||
     await getLocalRoomByCloudRoomIncludingArchived(roomIdentifier);

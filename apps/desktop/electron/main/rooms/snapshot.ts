@@ -8,6 +8,7 @@ import { workspaceRoot } from "#provider-runtime/paths.js";
 import {
   createLocalRoom,
   cloudRoomIdentifierForStorage,
+  folderRoomAwaitsServerList,
   listLocalTasks,
   resolveLocalAwareRoomStorageMode,
 } from "./local-store.js";
@@ -24,6 +25,8 @@ import {
   createRoomNotFoundSnapshot,
   createUnavailableRoomSnapshot,
 } from "./snapshot/snapshots.js";
+
+const SERVER_LIST_PENDING_MESSAGE = "Waiting for your room list. LetAgents will try this room again.";
 
 export async function fetchRoomSnapshot(
   requestedRoomIdentifier?: string | null,
@@ -49,6 +52,11 @@ export async function fetchRoomSnapshot(
   try {
     const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
     if (storage.effectiveMode === "local") {
+      // The server's room list is not here yet: a folder-derived id might be a
+      // server room, so no local record is made. The caller reads again once the list answers.
+      if (await folderRoomAwaitsServerList(roomIdentifier)) {
+        return createUnavailableRoomSnapshot(roomIdentifier, new Error(SERVER_LIST_PENDING_MESSAGE));
+      }
       if (!storage.localRoom && !create) {
         return createRoomNotFoundSnapshot(roomIdentifier);
       }

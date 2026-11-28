@@ -1026,6 +1026,91 @@ test("the first-list wait is bounded, happens once, and skips a signed-out start
   servers.setServerListWaitGate(async () => false);
 });
 
+test("a real local folder room never waits for the server list, and a failed list ends the wait", async () => {
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  const real = "local-realfolder-0123456789";
+  servers.resetServerListedRooms();
+  servers.setServerListWaitGate(async () => true);
+  try {
+    await createLocalRoom({ roomIdentifier: real, displayName: "Real folder" });
+    let started = Date.now();
+    assert.equal((await resolveLocalAwareRoomStorageMode(real)).effectiveMode, "local");
+    assert.ok(Date.now() - started < 1000, "a real record means local at once, with the list unknown");
+
+    servers.resetServerListedRooms();
+    started = Date.now();
+    const waiting = servers.waitForFirstServerList(2500);
+    setTimeout(() => servers.noteServerListFailed(), 30);
+    await waiting;
+    assert.ok(Date.now() - started < 1000, "a failed list fetch ends the wait");
+  } finally { servers.resetServerListedRooms(); servers.setServerListWaitGate(async () => false); }
+});
+
+test("a first list slower than the wait creates no record, and the room ends cloud after the list", async () => {
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  const { fetchRoomSnapshot } = await import("../main/rooms/snapshot.js");
+  const id = "local-slowlist-aaaaaaaaaa";
+  servers.resetServerListedRooms();
+  servers.setServerListWaitGate(async () => true);
+  const previousFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => { calls.push(String(input)); return new Response("{}", { status: 500 }); }) as typeof fetch;
+  try {
+    const first = await fetchRoomSnapshot(id); // the wait times out (3 s): the list is still not here
+    assert.equal(first.access.status, "unavailable");
+    assert.equal(first.access.httpStatus, null, "retryable, not a 404");
+    assert.equal(await getLocalRoomIncludingArchived(id), null, "no record while the list is unknown");
+    assert.equal(calls.length, 0);
+    // A later read, still before the list: the same.
+    assert.equal((await fetchRoomSnapshot(id)).access.status, "unavailable");
+    assert.equal(await getLocalRoomIncludingArchived(id), null);
+    servers.rememberServerListedRooms([{ roomIdentifier: id, archived: false }]);
+    await fetchRoomSnapshot(id);
+    assert.equal(await getLocalRoomIncludingArchived(id), null, "the room is read from the server");
+    assert.ok(calls.some((call) => call.includes("/join")));
+  } finally {
+    globalThis.fetch = previousFetch;
+    servers.resetServerListedRooms();
+    servers.setServerListWaitGate(async () => false);
+  }
+});
+
+test("a list answer from before a reset is dropped, and an old wait timer does not mark the new account", async () => {
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  servers.setServerListWaitGate(async () => true);
+  try {
+    servers.resetServerListedRooms();
+    const generation = servers.beginServerListFetch(); // account A's fetch starts
+    const oldWait = servers.waitForFirstServerList(60);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    servers.resetServerListedRooms(); // switch to account B: wakes the old wait
+    const started = Date.now();
+    await oldWait;
+    assert.ok(Date.now() - started < 40, "the reset wakes the old wait");
+    servers.rememberServerListedRooms([{ roomIdentifier: "local-accounta-cccccccccc", archived: false }], { generation });
+    assert.equal(servers.isServerListedRoom("local-accounta-cccccccccc"), false, "A's answer is dropped");
+    assert.equal(await servers.isServerListPending(), true, "B's list is still not known");
+    servers.noteServerListFailed(generation);
+    const second = Date.now();
+    await servers.waitForFirstServerList(80);
+    assert.ok(Date.now() - second >= 60, "A's failure and A's timer do not end B's wait");
+  } finally { servers.resetServerListedRooms(); servers.setServerListWaitGate(async () => false); }
+});
+
+test("a full page of the list only adds active ids and removes archived ones", async () => {
+  const servers = await import("../main/rooms/server-listed-rooms.js");
+  const entry = (roomIdentifier: string, archived = false) => ({ roomIdentifier, archived });
+  servers.resetServerListedRooms();
+  servers.rememberServerListedRooms([entry("local-aaa-0000000001"), entry("local-bbb-0000000002")]);
+  servers.rememberServerListedRooms([entry("local-ccc-0000000003"), entry("local-bbb-0000000002", true)], { fullPage: true });
+  assert.equal(servers.isServerListedRoom("local-aaa-0000000001"), true, "a full page may hide it, so it stays");
+  assert.equal(servers.isServerListedRoom("local-ccc-0000000003"), true);
+  assert.equal(servers.isServerListedRoom("local-bbb-0000000002"), false, "archived never counts");
+  servers.rememberServerListedRooms([entry("local-ddd-0000000004")]);
+  assert.equal(servers.isServerListedRoom("local-aaa-0000000001"), false, "a complete page replaces");
+  servers.resetServerListedRooms();
+});
+
 test("a stub same-id record is ignored when the server lists the id; a real record is kept", async () => {
   const servers = await import("../main/rooms/server-listed-rooms.js");
   const stub = "local-fbrf-186988c484", withMessage = "local-withmsg-0123456789", withTask = "local-withtask-0123456789";

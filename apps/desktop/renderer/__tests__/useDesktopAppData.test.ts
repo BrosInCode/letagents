@@ -1696,6 +1696,25 @@ describe("useDesktopAppData root room refresh", () => {
     assert.equal(harness.rootRoomSnapshot.value?.room?.displayName, "letagents");
   });
 
+  it("reads a folder-derived server room again after the account list answered, instead of staying unavailable", async () => {
+    const id = "local-autodownloader-7d47027e95";
+    const harness = createHarness({ selectedRootRoomIdentifier: id });
+    harness.rootRoomSnapshot.value = null;
+    harness.activeEntry.value = { ...parentEntry(), roomIdentifier: id };
+    harness.nextAccountRooms = [accountRoomEntry(id, { displayName: "fern-river" })];
+    const bridge = harness.windowBridge as { letagentsDesktop: { room: {
+      getSnapshot: (identifier: string | null) => Promise<DesktopRoomSnapshot>;
+    } } };
+    bridge.letagentsDesktop.room.getSnapshot = async (identifier) => {
+      harness.getSnapshotRequests.push(identifier);
+      // The first read ran before the room list answered: no local record, retryable.
+      return harness.getSnapshotRequests.length === 1 ? nonReadySnapshot(identifier!, "unavailable") : roomSnapshot(id);
+    };
+    await withDesktopBridge(harness.windowBridge, () => harness.state.refresh());
+    assert.deepEqual(harness.getSnapshotRequests.slice(0, 2), [id, id]);
+    assert.equal(harness.rootRoomSnapshot.value?.access.status, "ready");
+  });
+
   it("opens the room without waiting for a slow folder Git status, and applies the status when it comes", async () => {
     // A cold Git read of a repository with hundreds of worktrees took over 15 s.
     // The room had arrived in a second, but the first load waited for both and

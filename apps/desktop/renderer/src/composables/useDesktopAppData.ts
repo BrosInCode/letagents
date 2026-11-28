@@ -1,4 +1,5 @@
 import { activityUnread } from '../../../../../shared/ui/activity/unread';
+import { isFolderDerivedLocalRoomId } from "../../../../../shared/local-room-identity.mjs";
 import { computed, getCurrentScope, onScopeDispose, ref, toRaw, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -478,6 +479,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     snapshot: DesktopRoomSnapshot,
     accountRooms: readonly DesktopAccountRoomEntry[],
   ): Promise<DesktopRoomSnapshot> {
+    // A folder-derived id read before the account's room list answered comes
+    // back unavailable (no local record is made). The list has answered by
+    // now, so read it once more.
+    if (requestedRoomIdentifier && isFolderDerivedLocalRoomId(requestedRoomIdentifier)
+      && snapshot.access.status === "unavailable" && !snapshot.access.httpStatus) {
+      const reread = await getRoomSnapshot(requestedRoomIdentifier);
+      if (reread.access.status !== "unavailable") return reread;
+    }
     if (!shouldRecoverRootRoomSnapshot(requestedRoomIdentifier, snapshot)) {
       return snapshot;
     }
