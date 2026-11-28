@@ -841,19 +841,21 @@ function projectIsCollapsed(projectId: string): boolean {
 }
 
 /** Collapsed, the parent row totals the group; expanded, it shows only its own room. */
-function projectUnreadBadge(project: ProjectGroup): { count: number; markedUnread: boolean; label: string | undefined } {
+function projectUnreadBadge(project: ProjectGroup): UnreadBadgeProps {
   return unreadBadgeProps(sidebarGroupUnread(project, projectIsCollapsed(project.id), roomNotificationsMuted));
 }
 
 /** Rooms behind "Show N more" keep their unread messages visible on that button. */
-function projectOverflowUnreadBadge(project: ProjectGroup): { count: number; markedUnread: boolean; label: string | undefined } {
+function projectOverflowUnreadBadge(project: ProjectGroup): UnreadBadgeProps {
   const visible = new Set(visibleProjectChildRooms(project).map((room) => room.id));
   const hidden = projectChildRooms(project).filter((room) => !visible.has(room.id));
   return unreadBadgeProps(sidebarUnreadTotal(hidden, { isMuted: roomNotificationsMuted }));
 }
 
-function unreadBadgeProps(unread: SidebarUnreadTotal): { count: number; markedUnread: boolean; label: string | undefined } {
-  return { count: unread.count, markedUnread: unread.markedUnread, label: describeSidebarUnreadTotal(unread) || undefined };
+type UnreadBadgeProps = { count: number; mentionCount: number; markedUnread: boolean; label: string | undefined };
+
+function unreadBadgeProps(unread: SidebarUnreadTotal): UnreadBadgeProps {
+  return { count: unread.count, mentionCount: unread.mentionCount, markedUnread: unread.markedUnread, label: describeSidebarUnreadTotal(unread) || undefined };
 }
 function toggleProject(projectId: string): void {
   if (zenMode.value) zenCollapsedProjects.value[projectId] = !projectIsCollapsed(projectId);

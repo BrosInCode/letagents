@@ -47,7 +47,7 @@
         >
           <span class="sidebar-switcher-icon" aria-hidden="true"><GitBranch v-if="option.entry.kind === 'branch'" /><MessageSquare v-else-if="option.entry.kind === 'focus'" /><Folder v-else /></span>
           <span class="sidebar-switcher-copy"><strong>{{ option.title }}</strong><small>{{ option.detail }}</small></span>
-          <RoomUnreadBadge :count="option.entry.unreadCount || 0" :marked-unread="option.entry.hasUnread" />
+          <RoomUnreadBadge :count="option.entry.unreadCount || 0" :mention-count="option.entry.mentionCount || 0" :marked-unread="option.entry.hasUnread" />
           <span v-if="option.entry.id === activeEntryId || (option.entry.kind === 'parent' && option.projectId === activeProjectId)" class="sidebar-switcher-current">Current<Check aria-hidden="true" /></span>
           <ChevronRight v-else class="sidebar-switcher-arrow" aria-hidden="true" />
         </div>

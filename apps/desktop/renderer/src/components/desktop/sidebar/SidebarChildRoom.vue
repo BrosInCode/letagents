@@ -27,7 +27,7 @@
       <span class="room-title">{{ sidebarRoomTitle(entry) }}</span>
       <RoomMutedIcon :room-identifier="entry.roomIdentifier" />
       <SidebarRoomActivity :activity="entry.activity" />
-      <RoomUnreadBadge :count="entry.unreadCount || 0" :marked-unread="entry.hasUnread" />
+      <RoomUnreadBadge :count="entry.unreadCount || 0" :mention-count="entry.mentionCount || 0" :marked-unread="entry.hasUnread" />
     </span>
   </button>
 </template>

@@ -26,8 +26,17 @@ describe("desktop sidebar unread badge contract", () => {
     );
   });
 
-  it("single rooms keep their own count in child rows and search results", () => {
+  it("single rooms keep their own count and mention mark in child rows and search results", () => {
     const switcher = readFileSync(new URL("../src/components/desktop/sidebar/SidebarRoomSwitcher.vue", import.meta.url), "utf8");
-    assert.match(switcher, /<RoomUnreadBadge :count="option\.entry\.unreadCount \|\| 0" :marked-unread="option\.entry\.hasUnread" \/>/);
+    const child = readFileSync(new URL("../src/components/desktop/sidebar/SidebarChildRoom.vue", import.meta.url), "utf8");
+    assert.match(switcher, /<RoomUnreadBadge :count="option\.entry\.unreadCount \|\| 0" :mention-count="option\.entry\.mentionCount \|\| 0" :marked-unread="option\.entry\.hasUnread" \/>/);
+    assert.match(child, /<RoomUnreadBadge :count="entry\.unreadCount \|\| 0" :mention-count="entry\.mentionCount \|\| 0" :marked-unread="entry\.hasUnread" \/>/);
+  });
+
+  it("group and overflow badges carry the mention total of the rooms they count", () => {
+    assert.match(
+      sidebarSource,
+      /function unreadBadgeProps\(unread: SidebarUnreadTotal\): UnreadBadgeProps \{\s*return \{ count: unread\.count, mentionCount: unread\.mentionCount,/,
+    );
   });
 });

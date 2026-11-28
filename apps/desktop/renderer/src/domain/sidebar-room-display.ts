@@ -53,7 +53,7 @@ export function sidebarProjectDetails(project: ProjectGroup): string {
 export interface SidebarUnreadTotal {
   /** Unread messages the badge counts. */
   count: number;
-  /** How many of those messages mention the viewer, under the same muting rule. Data only: no badge shows it yet. */
+  /** How many of those messages mention the viewer, under the same muting rule. The badge then shows "@". */
   mentionCount: number;
   /** Some room in the span is unread; with nothing to count the badge is a dot. */
   markedUnread: boolean;
@@ -95,6 +95,11 @@ export function sidebarGroupUnread(
 ): SidebarUnreadTotal {
   const folded = collapsed ? [...project.focusRooms, ...project.branchRooms] : [];
   return sidebarUnreadTotal([project.parent, ...folded], { own: project.parent, isMuted });
+}
+
+/** The part of a badge's label that says how many unread messages mention the viewer. */
+export function describeUnreadMentions(mentionCount: number): string {
+  return mentionCount === 1 ? "including 1 that mentions you" : `including ${mentionCount} that mention you`;
 }
 
 /** What a multi-room unread badge says, read aloud and in its tooltip. */
