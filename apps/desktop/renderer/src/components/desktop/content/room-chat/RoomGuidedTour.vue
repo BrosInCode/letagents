@@ -71,6 +71,9 @@ const cardStyle = computed(() => ({ transform: `translate3d(${cardPos.value.x}px
 
 // ---- Timing. The card stays still; only the strings move.
 const SHOOT_MS = 420, OPEN_MS = 260, RELEASE_MS = 420, SHOOT_DELAY_MS = 140, WELCOME_MS = 3200, POINTS = 24;
+// Once the strings land they sway for SWAY_MS, then come to rest and the loop stops: a tour
+// someone is reading costs nothing until the step, the window or the part changes.
+const SWAY_MS = 1400, STILL_MS = 700, MAX_AWAKE_MS = 4000, MOVED_CHECK_MS = 400;
 const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 type Rect = { x: number; y: number; w: number; h: number };
@@ -79,8 +82,13 @@ type Strand = {
   alpha: number; state: "shooting" | "held" | "released"; t0: number; seg: number;
 };
 let strands: Strand[] = [];
-let shootAt = 0, landedAt = 0, frame = 0, lastTick = 0, welcomeTimer = 0, skipFrame = false;
+let shootAt = 0, landedAt = 0, frame = 0, lastTick = 0, welcomeTimer = 0;
 let settleObserver: ResizeObserver | null = null, settleFrame = 0;
+// Layout reads for one frame. simulate() and draw() ask for the part and the card many times
+// a frame; reading them once keeps a busy room from paying for repeated layout queries.
+let frameTarget: Rect | null | undefined, frameCard: DOMRect | null | undefined;
+// How far the strings moved in the last step (px), and where the last frame put the part and the card.
+let motion = 0, drawnAt = "", movedTimer = 0;
 let ctx: CanvasRenderingContext2D | null = null;
 let accent = "#a8dec7";
 
@@ -93,6 +101,7 @@ function visibleTarget(selector: string): DOMRect | undefined {
 }
 /** Read every frame: the part may move (sidebar, resize, late layout). Null once it is gone. */
 function targetRect(): Rect | null {
+  if (frameTarget !== undefined) return frameTarget;
   if (welcomeShown.value) return null;
   const box = visibleTarget(step.value.selector);
   if (!box) return null;
@@ -115,8 +124,12 @@ function placeCard() {
 // ---- Strings: each strand is a chain of points (a Verlet rope). Its first point is held on the card;
 // while shooting, the last point flies along an arc to the part; once it lands it is pinned there and
 // the 6% slack makes it sag and sway. On the next step the strands let go, recoil and fade.
+function cardBox(): DOMRect | null {
+  if (frameCard !== undefined) return frameCard;
+  return card.value?.getBoundingClientRect() ?? null;
+}
 function cardEdgeToward(target: { x: number; y: number }) {
-  const box = card.value?.getBoundingClientRect();
+  const box = cardBox();
   if (!box) return { x: innerWidth / 2, y: innerHeight / 2 };
   const cx = box.left + box.width / 2, cy = box.top + box.height / 2;
   const dx = target.x - cx, dy = target.y - cy;
@@ -124,7 +137,7 @@ function cardEdgeToward(target: { x: number; y: number }) {
   return { x: cx + dx * k * .97, y: cy + dy * k * .97 };
 }
 function landingPoint(rect: Rect, offset: number) {
-  const box = card.value?.getBoundingClientRect();
+  const box = cardBox();
   const cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2;
   const fromX = box ? box.left + box.width / 2 : innerWidth / 2;
   const fromY = box ? box.top + box.height / 2 : innerHeight / 2;
@@ -148,6 +161,9 @@ function shoot(now: number) {
 function simulate(now: number, dt: number) {
   const rect = targetRect();
   const gravity = 1400 * dt * dt;
+  // The breeze dies down after the strings land, so they come to rest and the loop can stop.
+  const calm = landedAt ? Math.max(0, 1 - (now - landedAt - OPEN_MS) / SWAY_MS) : 1;
+  const breeze = 540 * dt * dt * Math.min(1, calm) ** 2;
   for (const strand of strands) {
     const { pts, prev } = strand;
     const target = rect ? landingPoint(rect, strand.offset) : null;
@@ -178,7 +194,7 @@ function simulate(now: number, dt: number) {
       const x = pts[j * 2], y = pts[j * 2 + 1];
       const vx = (x - prev[j * 2]) * .975, vy = (y - prev[j * 2 + 1]) * .975;
       prev[j * 2] = x; prev[j * 2 + 1] = y;
-      pts[j * 2] = x + vx + Math.sin(now / 900 + strand.phase + j * .35) * 540 * dt * dt;
+      pts[j * 2] = x + vx + Math.sin(now / 900 + strand.phase + j * .35) * breeze;
       pts[j * 2 + 1] = y + vy + gravity;
     }
     for (let k = 0; k < 12; k++) {
@@ -196,6 +212,7 @@ function simulate(now: number, dt: number) {
         pts[i1] -= dx * diff * w1; pts[i1 + 1] -= dy * diff * w1;
       }
     }
+    for (let j = 1; j < POINTS; j++) motion = Math.max(motion, Math.abs(pts[j * 2] - prev[j * 2]), Math.abs(pts[j * 2 + 1] - prev[j * 2 + 1]));
   }
   strands = strands.filter(strand => strand.alpha > .01);
 }
@@ -240,6 +257,7 @@ function draw(now: number) {
   ctx.fillStyle = "rgba(0,0,0,.72)";
   ctx.fillRect(0, 0, innerWidth, innerHeight);
   const rect = targetRect();
+  drawnAt = placement(rect, cardBox());
   const open = landedAt ? (reducedMotion() ? 1 : Math.min(1, (now - landedAt) / OPEN_MS)) : 0;
   if (rect && open > 0) {
     const e = 1 - (1 - open) ** 3;
@@ -264,15 +282,17 @@ function draw(now: number) {
     }
     path.lineTo(pts[(POINTS - 1) * 2], pts[(POINTS - 1) * 2 + 1]);
     const alpha = strand.alpha * (strand.offset === 0 ? 1 : .6);
-    ctx.shadowColor = withAlpha(accent, .8 * alpha); ctx.shadowBlur = 10;
-    ctx.strokeStyle = withAlpha(accent, .2 * alpha); ctx.lineWidth = 5; ctx.stroke(path);
-    ctx.shadowBlur = 4;
+    // The glow is two wide, faint strokes under the core. Canvas shadows blur every pixel the
+    // path covers on every frame; on a full-window canvas that was most of the tour's GPU work.
+    ctx.strokeStyle = withAlpha(accent, .07 * alpha); ctx.lineWidth = 10; ctx.stroke(path);
+    ctx.strokeStyle = withAlpha(accent, .22 * alpha); ctx.lineWidth = 4.5; ctx.stroke(path);
     ctx.strokeStyle = withAlpha(accent, .85 * alpha); ctx.lineWidth = strand.offset === 0 ? 1.7 : 1.1; ctx.stroke(path);
-    ctx.shadowBlur = 0;
     ctx.strokeStyle = `rgba(255,255,255,${.5 * alpha})`; ctx.lineWidth = .6; ctx.stroke(path);
-    ctx.shadowBlur = 10; ctx.fillStyle = `rgba(255,255,255,${.9 * alpha})`;
-    ctx.beginPath(); ctx.arc(pts[(POINTS - 1) * 2], pts[(POINTS - 1) * 2 + 1], strand.state === "shooting" ? 2.4 : 1.7, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0;
+    const hx = pts[(POINTS - 1) * 2], hy = pts[(POINTS - 1) * 2 + 1], r = strand.state === "shooting" ? 2.4 : 1.7;
+    ctx.fillStyle = withAlpha(accent, .22 * alpha);
+    ctx.beginPath(); ctx.arc(hx, hy, r * 2.6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = `rgba(255,255,255,${.9 * alpha})`;
+    ctx.beginPath(); ctx.arc(hx, hy, r, 0, Math.PI * 2); ctx.fill();
   }
 }
 
@@ -284,51 +304,92 @@ function settleNow(now: number) {
   strands.forEach(strand => { strand.prev.set(strand.pts); });
   landedAt = now - OPEN_MS;
   draw(now);
+  watchForMoves();
 }
 
-/** Strings held and the opening fully open: only a slow sway is left, so half the frames are enough. */
-function resting(now: number) {
-  return !shootAt && landedAt > 0 && now - landedAt >= OPEN_MS && strands.length > 0 && strands.every(strand => strand.state === "held");
+/**
+ * Nothing left to move: no shot waiting, no string letting go, and the strings held and calm (or
+ * none at all, as on the welcome). The last frame stays on screen and the loop stops until
+ * run() starts it again: a new step, a resize, the window shown again, or the part moving.
+ */
+let wokeAt = 0;
+function still(now: number) {
+  if (shootAt || now - wokeAt < STILL_MS) return false;
+  if (!strands.length) return true;
+  const settled = landedAt > 0 && now - landedAt >= OPEN_MS + SWAY_MS && strands.every(strand => strand.state === "held");
+  // Calm means the strings stopped swinging too, not only that the breeze ended; a long pull
+  // (a resize) can leave a swing. MAX_AWAKE_MS caps the wait so a jitter cannot keep it awake.
+  return settled && (motion < .05 || now - wokeAt >= MAX_AWAKE_MS);
 }
 function tick(now: number) {
   frame = 0;
   if (!dialog.value?.open || document.hidden) return;  // a hidden window costs nothing; visibilitychange resumes
-  if (shootAt && now >= shootAt) { shootAt = 0; shoot(now); }
-  // At rest, every other frame is skipped (about 30 fps); shooting and letting go run every frame.
-  skipFrame = resting(now) && !skipFrame;
-  if (!skipFrame) {
+  try {
+    frameTarget = undefined; frameCard = undefined;
+    frameCard = cardBox(); frameTarget = targetRect();
+    if (shootAt && now >= shootAt) { shootAt = 0; shoot(now); }
     const dt = Math.min(1 / 30, lastTick ? (now - lastTick) / 1000 : 1 / 60);
     lastTick = now;
+    motion = 0;
     simulate(now, dt / 2);
     simulate(now, dt / 2);
     draw(now);
+  } finally {
+    frameTarget = undefined; frameCard = undefined;
   }
-  frame = requestAnimationFrame(tick);
+  if (!still(now)) frame = requestAnimationFrame(tick);
+  else watchForMoves();
 }
 function run() {
   cancelAnimationFrame(frame);
+  window.clearTimeout(movedTimer);
   lastTick = 0;
-  if (reducedMotion()) { draw(performance.now()); return; }
+  wokeAt = performance.now();
+  if (reducedMotion()) { draw(wokeAt); watchForMoves(); return; }
   frame = requestAnimationFrame(tick);
+}
+function placement(rect: Rect | null, box: DOMRect | null) {
+  const r = rect ? `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.w)},${Math.round(rect.h)}` : "-";
+  return box ? `${r}|${Math.round(box.left)},${Math.round(box.top)},${Math.round(box.width)},${Math.round(box.height)}` : r;
+}
+/**
+ * While the loop is stopped, look every MOVED_CHECK_MS whether the part or the card moved: a tab
+ * that slides when a badge grows next to it, a part drawn again as a new element. Two layout reads
+ * a few times a second; any move wakes the loop (reduced motion settles again).
+ */
+function watchForMoves() {
+  window.clearTimeout(movedTimer);
+  movedTimer = window.setTimeout(() => {
+    if (!dialog.value?.open || frame) return;
+    if (document.hidden) { watchForMoves(); return; }
+    if (placement(targetRect(), cardBox()) !== drawnAt) followTarget();
+    else watchForMoves();
+  }, MOVED_CHECK_MS);
 }
 function onVisibility() { if (!document.hidden && dialog.value?.open) run(); }
 function resettle() { strands = []; settleNow(performance.now()); }
 function onResize() { placeCard(); if (reducedMotion()) resettle(); else run(); }
+/** The part moved while the loop was stopped: follow it (reduced motion settles again instead). */
+function followTarget() {
+  if (!dialog.value?.open) return;
+  if (reducedMotion()) {
+    cancelAnimationFrame(settleFrame);
+    settleFrame = requestAnimationFrame(() => { if (dialog.value?.open) resettle(); });
+  } else if (!frame) run();
+}
 /**
- * Reduced motion draws once, so a part that moves later (the sidebar, a late layout) would leave
- * the opening behind. Watch the part and the room, and settle again on the next frame.
+ * The loop stops at rest (and reduced motion draws once), so a part that changes size later (the
+ * sidebar, a late layout) would leave the opening behind. Watch the part and the room; a part
+ * that only moves is caught by watchForMoves().
  */
-function watchTargetForReducedMotion() {
+function watchTarget() {
   settleObserver?.disconnect();
   settleObserver = null;
-  if (!reducedMotion() || welcomeShown.value || typeof ResizeObserver !== "function") return;
+  if (welcomeShown.value || typeof ResizeObserver !== "function") return;
   const target = [...document.querySelectorAll<HTMLElement>(step.value.selector)]
     .find(element => !element.closest('[inert], [hidden], [aria-hidden="true"]'));
   const room = dialog.value?.closest<HTMLElement>(".desktop-room-shell");
-  settleObserver = new ResizeObserver(() => {
-    cancelAnimationFrame(settleFrame);
-    settleFrame = requestAnimationFrame(() => { if (dialog.value?.open) resettle(); });
-  });
+  settleObserver = new ResizeObserver(followTarget);
   for (const element of [target, room]) if (element) settleObserver.observe(element);
 }
 function onContextRestored() { readAccent(); run(); }
@@ -348,10 +409,12 @@ function showStep(next: number) {
   landedAt = 0;
   if (reducedMotion()) {
     strands = [];
-    void nextTick(() => { settleNow(performance.now()); watchTargetForReducedMotion(); });
+    void nextTick(() => { settleNow(performance.now()); watchTarget(); });
     return;
   }
   shootAt = now + SHOOT_DELAY_MS;
+  run();  // the loop may have stopped at rest on the last step
+  void nextTick(watchTarget);
 }
 /** The welcome moves on by itself, unless the person is reading it (pointer or focus in the card). */
 function holdWelcome() { window.clearTimeout(welcomeTimer); }
@@ -403,9 +466,10 @@ async function open(options: { welcome?: { name?: string | null } } = {}) {
     }
   } else if (reducedMotion()) {
     settleNow(performance.now());
-    watchTargetForReducedMotion();
+    watchTarget();
   } else {
     shootAt = performance.now() + 240;
+    watchTarget();
   }
   run();
 }
@@ -421,6 +485,7 @@ function stop() {
   removeEventListener("resize", onResize);
   removeEventListener("keydown", onKey);
   document.removeEventListener("visibilitychange", onVisibility);
+  window.clearTimeout(movedTimer);
   canvas.value?.removeEventListener("contextrestored", onContextRestored);
 }
 function close() { dialog.value?.close(); }
@@ -456,8 +521,9 @@ defineExpose({ open, close });
 .room-guide-card {
   position: absolute; top: 0; left: 0; box-sizing: border-box; width: min(340px, calc(100vw - 32px)); padding: 20px 20px 14px;
   border: 1px solid var(--workspace-border, var(--border)); border-radius: 16px;
-  background: color-mix(in srgb, var(--workspace-canvas, var(--bg)) 82%, transparent);
-  backdrop-filter: blur(16px) saturate(1.15); -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  /* Solid, not frosted: a backdrop blur over the canvas had to be redone on every frame the
+     strings moved, and it showed the room's own heading as a smear through the card. */
+  background: var(--workspace-canvas, var(--bg));
   box-shadow: 0 24px 60px -20px #000a;
   animation: room-guide-in 360ms cubic-bezier(.16, 1, .3, 1) both;
 }
