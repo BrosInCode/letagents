@@ -345,3 +345,41 @@ export interface MyWorkPage {
   /** The trackers the account has connected. */
   providers: TrackerProvider[];
 }
+
+/** The app that owns a session read from this computer. */
+export type MyWorkSessionProvider = "claude-code" | "codex";
+
+/**
+ * Working: the session changed in the last few minutes. Needs you: the app
+ * stopped the turn for the person (a question or an error). Idle: neither.
+ */
+export type MyWorkSessionState = "working" | "needs_you" | "idle";
+
+/** A pull request that a local session opened or works on. */
+export interface MyWorkSessionPullRequest {
+  url: string;
+  number: number;
+  /** `OPEN`, `CLOSED` or `MERGED`, as the app last saw it. */
+  state: string | null;
+  branch: string | null;
+}
+
+/**
+ * A Claude Code session or Codex thread on this computer, in a folder bound
+ * to a LetAgents project. Desktop only: an index read on the computer and
+ * never sent to the server. It holds no prompts, answers or tool output.
+ */
+export interface MyWorkLocalSession {
+  provider: MyWorkSessionProvider;
+  /** The app's own id: `local_<uuid>` for Claude Code, the thread id for Codex. */
+  id: string;
+  title: string | null;
+  /** The bound project folder that holds the session's folder. */
+  projectRoot: string;
+  /** The project room of that folder, e.g. `github.com/owner/repo`. */
+  projectRoomId: string | null;
+  branch: string | null;
+  lastActivityAt: string;
+  state: MyWorkSessionState;
+  pullRequests: MyWorkSessionPullRequest[];
+}

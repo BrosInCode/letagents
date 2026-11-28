@@ -20,6 +20,7 @@ import { renderToString } from "@vue/server-renderer";
 import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 import type {
   MyWorkCard,
+  MyWorkLocalSession,
   MyWorkPage,
 } from "../../../../shared/ticket-connectors.mjs";
 import type { MyWorkApi, WorkQuery } from "../../../../shared/ui/my-work/types";
@@ -37,6 +38,14 @@ import {
   workOwnerAvatarName,
   workSignal,
   safeWorkUrl,
+  pullRequestKey,
+  sessionMatches,
+  sessionPullRequestsByState,
+  sessionRoomLabel,
+  sessionsForCards,
+  sessionStateLabel,
+  sessionsWithoutCard,
+  sessionTitle,
 } from "../../../../shared/ui/my-work/model";
 function card(overrides: Partial<MyWorkCard> = {}): MyWorkCard {
   return {
@@ -257,6 +266,7 @@ before(async () => {
   for (const file of [
     "my-work/MyWork.vue",
     "my-work/WorkDetail.vue",
+    "my-work/SessionDetail.vue",
     "FilterDropdown.vue",
     "my-work/WorkIcon.vue",
     "ChatAvatar.vue",
@@ -631,4 +641,127 @@ test("the owner falls back to the ticket's tracker assignee, then Unassigned", (
   assert.equal(workOwner(nobody), "Unassigned");
   assert.equal(workOwnerAvatarName(nobody), "Unassigned");
   assert.equal(trackerOnly.work_state, "in_review", "the stored work state is not changed");
+});
+
+const SESSION_NOW = Date.parse("2026-11-28T18:00:00.000Z");
+function localSession(overrides: Partial<MyWorkLocalSession> = {}): MyWorkLocalSession {
+  return {
+    provider: "claude-code",
+    id: "local_df13b133-1fad-402a-999e-a9c41e618fff",
+    title: "Proration fix",
+    projectRoot: "/Users/emmy/Projects/app",
+    projectRoomId: "github.com/acme/app",
+    branch: null,
+    lastActivityAt: new Date(SESSION_NOW - 2 * 60 * 60 * 1000).toISOString(),
+    state: "idle",
+    pullRequests: [{ url: "https://github.com/ACME/app/pull/88/files", number: 88, state: "OPEN", branch: "fix/proration" }],
+    ...overrides,
+  };
+}
+
+test("sessions join cards by pull request; only live or open-PR sessions without a card are listed", () => {
+  assert.equal(pullRequestKey("https://github.com/ACME/app/pull/88/files#diff"), "github.com/acme/app/88");
+  const linked = localSession();
+  const working = localSession({ id: "local_00000000-0000-4000-8000-000000000001", title: null, provider: "codex", state: "working", pullRequests: [] });
+  const openPr = localSession({ id: "local_00000000-0000-4000-8000-000000000002", title: "Room switch", pullRequests: [{ url: "https://github.com/acme/app/pull/90", number: 90, state: "OPEN", branch: null }] });
+  const merged = localSession({ id: "local_00000000-0000-4000-8000-000000000003", pullRequests: [{ url: "https://github.com/acme/app/pull/91", number: 91, state: "MERGED", branch: null }] });
+  const recentQuestion = localSession({ id: "local_00000000-0000-4000-8000-000000000004", state: "needs_you", pullRequests: [] });
+  const oldQuestion = localSession({ id: "local_00000000-0000-4000-8000-000000000005", state: "needs_you", pullRequests: [], lastActivityAt: "2026-11-01T00:00:00.000Z" });
+  const sessions = [linked, working, openPr, merged, recentQuestion, oldQuestion];
+  const byCard = sessionsForCards([card()], sessions);
+  assert.deepEqual(byCard.get(myWorkCardKey(card())), [linked]);
+  assert.deepEqual(sessionsWithoutCard(sessions, byCard, SESSION_NOW), [working, openPr, recentQuestion]);
+  assert.equal(sessionTitle(working), "Untitled Codex session");
+  assert.equal(sessionStateLabel(working, SESSION_NOW), "Working");
+  assert.equal(sessionStateLabel(recentQuestion, SESSION_NOW), "Needs you");
+  assert.equal(sessionStateLabel(oldQuestion, SESSION_NOW), "Idle · 28d");
+  assert.equal(sessionStateLabel(linked, SESSION_NOW), "Idle · 2h");
+  assert.equal(sessionRoomLabel(linked), "app");
+  assert.equal(sessionRoomLabel(localSession({ projectRoomId: "git-room:local:0123", projectRoot: "/Users/emmy/todo app" })), "todo app");
+  assert.equal(sessionMatches(openPr, "#90"), true);
+  assert.deepEqual(sessionPullRequestsByState([
+    { url: "u1", number: 2141, state: "CLOSED", branch: null },
+    { url: "u2", number: 2152, state: "MERGED", branch: null },
+    { url: "u3", number: 2156, state: "OPEN", branch: null },
+    { url: "u4", number: 2157, state: "OPEN", branch: null },
+  ]).map((pr) => pr.number), [2157, 2156, 2152, 2141]);
+  assert.equal(sessionMatches(openPr, "codex"), false);
+});
+
+test("a card shows the session that works on its pull request; sessions without a card get their own group and open in their app", async () => {
+  const realNow = Date.now;
+  Date.now = () => SESSION_NOW;
+  const opened: MyWorkLocalSession[] = [];
+  const loose = localSession({
+    provider: "codex",
+    id: "01a102a9-0d35-7c23-b04b-4adb30cfd5c1",
+    title: "Room interactions",
+    state: "working",
+    branch: "codex/room-interactions",
+    pullRequests: [{ url: "https://github.com/acme/app/pull/90", number: 90, state: "OPEN", branch: null }],
+  });
+  const api: MyWorkApi = {
+    ...emptyApi,
+    localSessions: async () => [localSession(), loose],
+    openSession: async (session) => { opened.push(session); },
+  };
+  const { root, unmount } = await mount(MyWork, () => ({ api }));
+  try {
+    const row = byTestId(root, "my-work-row")[0]!;
+    assert.match(textOf(row), /Proration fix/, "the session takes the owner column");
+    assert.match(textOf(row), /Idle · 2h/);
+    assert.ok(find(row, (n) => n.type === "img" && String(n.props.src).includes("claude-code.png")).length);
+    const group = byTestId(root, "my-work-sessions")[0]!;
+    assert.match(textOf(group), /On this computer, not on a board/);
+    const sessionRows = byTestId(root, "my-work-session-row");
+    assert.equal(sessionRows.length, 1);
+    assert.match(textOf(sessionRows[0]!), /Room interactions/);
+    assert.match(textOf(sessionRows[0]!), /#90\s*open/);
+    assert.match(textOf(sessionRows[0]!), /Working/);
+    (sessionRows[0]!.props.onClick as (event: unknown) => void)({ currentTarget: sessionRows[0] });
+    await settle();
+    const detail = byTestId(root, "my-work-session-detail")[0]!;
+    assert.match(textOf(detail), /Codex session/);
+    assert.match(textOf(detail), /Read from this computer/);
+    const open = byTestId(detail, "my-work-open-session")[0]!;
+    assert.match(textOf(open), /Open in Codex/);
+    (open.props.onClick as () => void)();
+    await settle();
+    assert.deepEqual(opened.map((session) => session.id), [loose.id]);
+  } finally {
+    unmount();
+    Date.now = realNow;
+  }
+});
+
+test("the web host has no session reader, so My work shows no session group", async () => {
+  const { root, unmount } = await mount(MyWork, () => ({ api: emptyApi }));
+  try {
+    assert.equal(byTestId(root, "my-work-sessions").length, 0);
+    assert.match(textOf(byTestId(root, "my-work-row")[0]!), /Ada/);
+  } finally {
+    unmount();
+  }
+});
+
+test("a card's detail lists its sessions with an Open action and an error that explains a failed open", async () => {
+  const value = card();
+  const opened: string[] = [];
+  const detail = await mount(WorkDetail, () => ({
+    card: value, api: emptyApi, hasConnections: true, titleId: "session-detail",
+    sessions: [localSession()], now: SESSION_NOW, canOpenSession: true,
+    sessionError: "Claude Code could not open this session.",
+    "onOpen-session": (session: MyWorkLocalSession) => opened.push(session.id),
+  }));
+  try {
+    const section = byTestId(detail.root, "my-work-detail-sessions")[0]!;
+    assert.match(textOf(section), /On this computer/);
+    assert.match(textOf(section), /Proration fix/);
+    assert.match(textOf(section), /could not open/);
+    const button = find(section, (n) => n.type === "button")[0]!;
+    (button.props.onClick as () => void)();
+    assert.deepEqual(opened, [localSession().id]);
+  } finally {
+    detail.unmount();
+  }
 });

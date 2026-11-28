@@ -1,9 +1,11 @@
 import {
   TRACKER_PROVIDER_LABELS,
   type MyWorkCard,
+  type MyWorkLocalSession,
   type MyWorkNeedsMeReason,
   type MyWorkPage,
   type MyWorkPullRequest,
+  type MyWorkSessionPullRequest,
 } from "../../ticket-connectors.mjs";
 
 export type MyWorkTrackerFilter = "" | "jira" | "linear" | "github" | "native";
@@ -271,4 +273,155 @@ export function safeWorkUrl(value: string | null): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sessions on this computer (desktop only).
+
+/** A session waiting on the person shows as "Needs you" only while it is this recent. */
+export const SESSION_NEEDS_YOU_MS = 3 * 24 * 60 * 60 * 1000;
+
+export function sessionKey(session: Pick<MyWorkLocalSession, "provider" | "id">): string {
+  return `${session.provider}\n${session.id}`;
+}
+
+/** One spelling per pull request, so a session and a card agree on it. */
+export function pullRequestKey(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const match = /^https?:\/\/([^/]+)\/([^/]+)\/([^/]+)\/pull\/(\d+)/i.exec(url.trim());
+  return match ? `${match[1]}/${match[2]}/${match[3]}/${match[4]}`.toLowerCase() : null;
+}
+
+/** The sessions that opened or work on one of the card's pull requests, newest first. */
+export function sessionsForCards(
+  cards: readonly MyWorkCard[],
+  sessions: readonly MyWorkLocalSession[],
+): Map<string, MyWorkLocalSession[]> {
+  const byPullRequest = new Map<string, MyWorkLocalSession[]>();
+  for (const session of sessions)
+    for (const pr of session.pullRequests) {
+      const key = pullRequestKey(pr.url);
+      if (!key) continue;
+      const list = byPullRequest.get(key) ?? [];
+      if (!list.includes(session)) list.push(session);
+      byPullRequest.set(key, list);
+    }
+  const result = new Map<string, MyWorkLocalSession[]>();
+  for (const card of cards) {
+    const linked = new Set<MyWorkLocalSession>();
+    for (const pr of card.pull_requests)
+      for (const session of byPullRequest.get(pullRequestKey(pr.url) ?? "") ?? [])
+        linked.add(session);
+    if (linked.size)
+      result.set(
+        myWorkCardKey(card),
+        [...linked].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt)),
+      );
+  }
+  return result;
+}
+
+function sessionNeedsYou(session: MyWorkLocalSession, now: number): boolean {
+  return (
+    session.state === "needs_you" &&
+    now - Date.parse(session.lastActivityAt) <= SESSION_NEEDS_YOU_MS
+  );
+}
+
+export function openSessionPullRequests(
+  session: Pick<MyWorkLocalSession, "pullRequests">,
+): MyWorkSessionPullRequest[] {
+  return session.pullRequests.filter((pr) => pr.state === "OPEN");
+}
+
+/**
+ * Sessions to list without a card: those on no card that are working now,
+ * need the person, or hold an open pull request. Other sessions are history.
+ */
+export function sessionsWithoutCard(
+  sessions: readonly MyWorkLocalSession[],
+  linked: ReadonlyMap<string, readonly MyWorkLocalSession[]>,
+  now: number,
+): MyWorkLocalSession[] {
+  const onCards = new Set([...linked.values()].flat());
+  return sessions.filter(
+    (session) =>
+      !onCards.has(session) &&
+      (session.state === "working" ||
+        sessionNeedsYou(session, now) ||
+        openSessionPullRequests(session).length > 0),
+  );
+}
+
+const PULL_REQUEST_STATE_ORDER: Record<string, number> = { OPEN: 0, MERGED: 1, CLOSED: 2 };
+
+/** Open pull requests first, then merged, then closed; newest first within each. */
+export function sessionPullRequestsByState(
+  pullRequests: readonly MyWorkSessionPullRequest[],
+): MyWorkSessionPullRequest[] {
+  return [...pullRequests].sort(
+    (a, b) =>
+      (PULL_REQUEST_STATE_ORDER[a.state ?? ""] ?? 3) -
+        (PULL_REQUEST_STATE_ORDER[b.state ?? ""] ?? 3) || b.number - a.number,
+  );
+}
+
+export function sessionProviderLabel(
+  provider: MyWorkLocalSession["provider"],
+): string {
+  return provider === "codex" ? "Codex" : "Claude Code";
+}
+
+export function sessionTitle(session: MyWorkLocalSession): string {
+  return session.title || `Untitled ${sessionProviderLabel(session.provider)} session`;
+}
+
+/** "Working", "Needs you", or how long ago it last changed. */
+export function sessionStateLabel(session: MyWorkLocalSession, now: number): string {
+  if (session.state === "working") return "Working";
+  if (sessionNeedsYou(session, now)) return "Needs you";
+  return `Idle · ${sessionAge(session.lastActivityAt, now)}`;
+}
+
+export function sessionTone(session: MyWorkLocalSession, now: number): string {
+  if (session.state === "working") return "blue";
+  if (sessionNeedsYou(session, now)) return "amber";
+  return "muted";
+}
+
+export function sessionAge(at: string, now: number): string {
+  const minutes = Math.max(0, Math.round((now - Date.parse(at)) / 60_000));
+  if (!Number.isFinite(minutes)) return "";
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.round(hours / 24)}d`;
+}
+
+/** The room label of a session's project: the repository name, else the folder name. */
+export function sessionRoomLabel(session: MyWorkLocalSession): string {
+  const room = session.projectRoomId ?? "";
+  const repo = /^github\.com\/[^/]+\/([^/]+)$/i.exec(room)?.[1];
+  return repo || session.projectRoot.split(/[\\/]/).filter(Boolean).at(-1) || room;
+}
+
+export function sessionPullRequestLabel(pr: MyWorkSessionPullRequest): string {
+  const state = pr.state ? pr.state.charAt(0) + pr.state.slice(1).toLowerCase() : "Linked";
+  return `#${pr.number} · ${state}`;
+}
+
+export function sessionMatches(session: MyWorkLocalSession, search: string): boolean {
+  const query = search.trim().toLocaleLowerCase();
+  if (!query) return true;
+  return [
+    sessionTitle(session),
+    sessionProviderLabel(session.provider),
+    sessionRoomLabel(session),
+    session.branch ?? "",
+    ...session.pullRequests.map((pr) => `#${pr.number}`),
+  ]
+    .join(" ")
+    .toLocaleLowerCase()
+    .includes(query);
 }

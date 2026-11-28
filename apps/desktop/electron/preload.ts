@@ -250,6 +250,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-task-ticket", roomIdentifier, taskId),
     getMyWork: (query) => ipcRenderer.invoke("desktop:room:my-work", query ?? {}),
     askMyWorkNeedsMe: (roomId, taskId) => ipcRenderer.invoke("desktop:room:my-work-needs-me", roomId, taskId),
+    getMyWorkLocalSessions: () => ipcRenderer.invoke("desktop:my-work:local-sessions"),
+    openMyWorkLocalSession: (provider, id) => ipcRenderer.invoke("desktop:my-work:open-session", provider, id),
     decideTaskJevLink: (roomIdentifier, taskId, prUrl, decision) =>
       ipcRenderer.invoke("desktop:room:decide-task-jev-link", roomIdentifier, taskId, prUrl, decision),
     listTrackerFilters: (roomIdentifier: string) =>

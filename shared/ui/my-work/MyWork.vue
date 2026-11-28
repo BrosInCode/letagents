@@ -109,14 +109,16 @@
       </div>
       <div
         :id="`${prefix}-list`"
+        class="work-list"
         role="tabpanel"
         :aria-labelledby="`${prefix}-${view}`"
       >
         <section
-          v-for="group in visibleGroups"
+          v-for="(group, index) in visibleGroups"
           :key="group.id"
           class="work-section"
           :data-group="group.id"
+          :style="{ order: index * 2 }"
         >
           <DisclosurePanel
             :open="!collapsed.has(group.id)"
@@ -165,7 +167,23 @@
                       /><span>{{ workOwner(card) }}</span></span
                     ></span
                   ></span
-                ><span class="work-row-owner"
+                ><span
+                  v-if="cardSession(card)"
+                  class="work-row-owner work-row-session"
+                  :data-tone="sessionTone(cardSession(card)!, now)"
+                  ><ChatAvatar
+                    :name="sessionProviderLabel(cardSession(card)!.provider)"
+                    agent
+                    :provider="cardSession(card)!.provider"
+                  /><span class="work-session-text"
+                    ><span>{{ sessionTitle(cardSession(card)!) }}</span
+                    ><small
+                      ><span class="work-session-dot" aria-hidden="true" />{{
+                        sessionStateLabel(cardSession(card)!, now)
+                      }}</small
+                    ></span
+                  ></span
+                ><span v-else class="work-row-owner"
                   ><ChatAvatar
                     :name="workOwnerAvatarName(card)"
                     :agent="Boolean(card.agent?.agent_key)"
@@ -195,8 +213,87 @@
             </div>
           </DisclosurePanel>
         </section>
+        <section
+          v-if="visibleSessions.length"
+          class="work-section"
+          data-group="sessions"
+          :style="{ order: sessionsOrder }"
+          data-testid="my-work-sessions"
+        >
+          <DisclosurePanel
+            :open="!sessionsCollapsed"
+            instant
+            @toggle="sessionsCollapsed = !sessionsCollapsed"
+            ><template #summary
+              ><span class="work-section-heading"
+                ><span>On this computer, not on a board</span
+                ><span class="work-section-count">{{
+                  visibleSessions.length
+                }}</span></span
+              ></template
+            >
+            <div class="work-lines">
+              <button
+                v-for="session in visibleSessions"
+                :key="sessionKey(session)"
+                type="button"
+                class="work-row work-session-row"
+                :data-work-id="sessionKey(session)"
+                :data-tone="sessionTone(session, now)"
+                :aria-expanded="selectedSessionKey === sessionKey(session)"
+                aria-haspopup="dialog"
+                data-testid="my-work-session-row"
+                @click="openSessionDetails(session, $event)"
+              >
+                <span class="work-symbol"><WorkIcon name="laptop" /></span
+                ><span class="work-row-content"
+                  ><strong class="work-title">{{ sessionTitle(session) }}</strong
+                  ><span class="work-meta"
+                    ><span>{{ sessionRoomLabel(session) }}</span
+                    ><template v-if="session.branch"
+                      ><span aria-hidden="true">·</span
+                      ><span class="work-key">{{ session.branch }}</span></template
+                    ><span class="work-compact-owner"
+                      ><span aria-hidden="true">·</span
+                      ><ChatAvatar
+                        :name="sessionProviderLabel(session.provider)"
+                        agent
+                        :provider="session.provider"
+                      /><span>{{ sessionStateLabel(session, now) }}</span></span
+                    ></span
+                  ></span
+                ><span class="work-row-owner work-row-session"
+                  ><ChatAvatar
+                    :name="sessionProviderLabel(session.provider)"
+                    agent
+                    :provider="session.provider"
+                  /><span class="work-session-text"
+                    ><span>{{ sessionProviderLabel(session.provider) }}</span
+                    ><small
+                      ><span class="work-session-dot" aria-hidden="true" />{{
+                        sessionStateLabel(session, now)
+                      }}</small
+                    ></span
+                  ></span
+                ><span class="work-row-progress"
+                  ><span
+                    v-if="openSessionPullRequests(session).length"
+                    class="work-signal work-pr-signal"
+                    data-tone="green"
+                    ><WorkIcon name="branch" />{{
+                      openSessionPullRequests(session)
+                        .map((pr) => `#${pr.number}`)
+                        .join(", ")
+                    }}
+                    open</span
+                  ><small v-else>No open pull request</small></span
+                ><WorkIcon name="right" class="work-row-chevron" />
+              </button>
+            </div>
+          </DisclosurePanel>
+        </section>
         <div
-          v-if="!visibleGroups.length && !error"
+          v-if="!visibleGroups.length && !visibleSessions.length && !error"
           class="work-empty"
           data-testid="my-work-empty"
         >
@@ -257,9 +354,25 @@
         :api="api"
         :has-connections="Boolean(page?.has_connections)"
         :title-id="`${prefix}-detail-title`"
+        :sessions="linkedSessions.get(myWorkCardKey(selected))"
+        :now="now"
+        :can-open-session="Boolean(api.openSession)"
+        :session-error="sessionOpenError"
         @close="closeDetails"
         @open-card="openCard"
         @open-thread="openThread"
+        @open-session="openSession"
+      />
+      <SessionDetail
+        v-else-if="selectedSession"
+        :session="selectedSession"
+        :title-id="`${prefix}-detail-title`"
+        :now="now"
+        :can-open="Boolean(api.openSession)"
+        :opening="sessionOpening"
+        :open-error="sessionOpenError"
+        @close="closeDetails"
+        @open-session="openSession"
       />
     </dialog>
   </section>
@@ -274,10 +387,14 @@ import {
   useId,
   watch,
 } from "vue";
-import type { MyWorkCard } from "../../ticket-connectors.mjs";
+import type {
+  MyWorkCard,
+  MyWorkLocalSession,
+} from "../../ticket-connectors.mjs";
 import ChatAvatar from "../ChatAvatar.vue";
 import DisclosurePanel from "../DisclosurePanel.vue";
 import FilterDropdown from "../FilterDropdown.vue";
+import SessionDetail from "./SessionDetail.vue";
 import WorkDetail from "./WorkDetail.vue";
 import WorkIcon from "./WorkIcon.vue";
 import type { MyWorkApi } from "./types";
@@ -289,6 +406,16 @@ import {
   primaryPullRequest,
   pullRequestLabel,
   pullRequestStateLabel,
+  openSessionPullRequests,
+  sessionKey,
+  sessionMatches,
+  sessionProviderLabel,
+  sessionRoomLabel,
+  sessionsForCards,
+  sessionStateLabel,
+  sessionsWithoutCard,
+  sessionTitle,
+  sessionTone,
   workDate,
   workGroup,
   workGroups,
@@ -335,6 +462,54 @@ const revealedKeys = ref(new Set<string>());
 const selected = computed(() =>
   cards.value.find((card) => myWorkCardKey(card) === selectedKey.value),
 );
+// Sessions on this computer (desktop only): read when My work opens, on
+// Refresh and when the window comes back into focus. Never polled.
+const sessions = ref<MyWorkLocalSession[]>([]),
+  now = ref(Date.now()),
+  sessionsCollapsed = ref(false),
+  selectedSessionKey = ref<string | null>(null),
+  sessionOpening = ref(false),
+  sessionOpenError = ref("");
+let sessionsRequest = 0;
+async function loadSessions() {
+  if (!props.api.localSessions) return;
+  const request = ++sessionsRequest;
+  try {
+    const next = await props.api.localSessions();
+    if (request !== sessionsRequest) return;
+    now.value = Date.now();
+    sessions.value = next;
+  } catch {
+    // Sessions are an extra; My work stays usable without them.
+  }
+}
+function focusSessions() {
+  if (document.visibilityState === "visible") void loadSessions();
+}
+const linkedSessions = computed(() =>
+  sessionsForCards(cards.value, sessions.value),
+);
+function cardSession(card: MyWorkCard): MyWorkLocalSession | undefined {
+  return linkedSessions.value.get(myWorkCardKey(card))?.[0];
+}
+const looseSessions = computed(() =>
+  sessionsWithoutCard(sessions.value, linkedSessions.value, now.value),
+);
+const visibleSessions = computed(() =>
+  view.value === "all" || view.value === "active"
+    ? looseSessions.value.filter(
+        (session) =>
+          !filters.tracker &&
+          (!filters.roomId || session.projectRoomId === filters.roomId) &&
+          sessionMatches(session, search.value),
+      )
+    : [],
+);
+const selectedSession = computed(() =>
+  sessions.value.find(
+    (session) => sessionKey(session) === selectedSessionKey.value,
+  ),
+);
 const views: { id: WorkView; label: string }[] = [
   { id: "all", label: "All work" },
   { id: "attention", label: "Needs you" },
@@ -343,10 +518,12 @@ const views: { id: WorkView; label: string }[] = [
 ];
 const trackerOptions = computed(() => myWorkTrackerOptions(page.value));
 const counts = computed(() => ({
-  all: cards.value.length,
+  all: cards.value.length + looseSessions.value.length,
   attention: cards.value.filter((card) => workGroup(card) === "attention")
     .length,
-  active: cards.value.filter((card) => workGroup(card) === "active").length,
+  active:
+    cards.value.filter((card) => workGroup(card) === "active").length +
+    looseSessions.value.length,
   done: cards.value.filter((card) => workGroup(card) === "done").length,
 }));
 const visibleCards = computed(() =>
@@ -368,6 +545,16 @@ const visibleGroups = computed(() =>
     }))
     .filter((group) => group.cards.length),
 );
+/** The session group sits after "In progress", else before "Up next" and "Completed". */
+const sessionsOrder = computed(() => {
+  const groups = visibleGroups.value;
+  const active = groups.findIndex((group) => group.id === "active");
+  if (active !== -1) return active * 2 + 1;
+  const later = groups.findIndex(
+    (group) => group.id === "queue" || group.id === "done",
+  );
+  return later === -1 ? groups.length * 2 : later * 2 - 1;
+});
 const pendingMoves = computed(() =>
   cards.value.some(
     (card) =>
@@ -398,6 +585,7 @@ async function showMore() {
   revealedKeys.value = new Set(cards.value.map(myWorkCardKey));
 }
 async function refresh() {
+  void loadSessions();
   await reload(true);
   applyGroups();
 }
@@ -425,6 +613,8 @@ async function openDetails(card: MyWorkCard, event: MouseEvent) {
   returnFocus = event.currentTarget as HTMLElement;
   const key = myWorkCardKey(card);
   selectedKey.value = key;
+  selectedSessionKey.value = null;
+  sessionOpenError.value = "";
   await nextTick();
   if (
     selectedKey.value !== key ||
@@ -437,9 +627,44 @@ async function openDetails(card: MyWorkCard, event: MouseEvent) {
     ?.querySelector<HTMLElement>('[aria-label="Close work details"]')
     ?.focus({ preventScroll: true });
 }
+async function openSessionDetails(
+  session: MyWorkLocalSession,
+  event: MouseEvent,
+) {
+  returnFocus = event.currentTarget as HTMLElement;
+  const key = sessionKey(session);
+  selectedKey.value = null;
+  selectedSessionKey.value = key;
+  sessionOpenError.value = "";
+  await nextTick();
+  if (
+    selectedSessionKey.value !== key ||
+    !selectedSession.value ||
+    !dialog.value?.isConnected
+  )
+    return;
+  dialog.value.showModal();
+  dialog.value
+    ?.querySelector<HTMLElement>('[aria-label="Close work details"]')
+    ?.focus({ preventScroll: true });
+}
+async function openSession(session: MyWorkLocalSession) {
+  if (!props.api.openSession || sessionOpening.value) return;
+  sessionOpening.value = true;
+  sessionOpenError.value = "";
+  try {
+    await props.api.openSession(session);
+  } catch {
+    sessionOpenError.value = `${sessionProviderLabel(session.provider)} could not open this session. Check that the app is installed and the session is not archived.`;
+  } finally {
+    sessionOpening.value = false;
+  }
+}
 function closeDetails() {
   dialog.value?.close();
   selectedKey.value = null;
+  selectedSessionKey.value = null;
+  sessionOpenError.value = "";
   if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
 }
 function openCard(card: MyWorkCard) {
@@ -494,9 +719,17 @@ function shortcut(event: KeyboardEvent) {
     searchInput.value?.focus();
   }
 }
-onMounted(() => document.addEventListener("keydown", shortcut));
+onMounted(() => {
+  document.addEventListener("keydown", shortcut);
+  document.addEventListener("visibilitychange", focusSessions);
+  window.addEventListener("focus", focusSessions);
+  void loadSessions();
+});
 onBeforeUnmount(() => {
+  sessionsRequest++;
   document.removeEventListener("keydown", shortcut);
+  document.removeEventListener("visibilitychange", focusSessions);
+  window.removeEventListener("focus", focusSessions);
   dialog.value?.close();
 });
 </script>

@@ -21,6 +21,8 @@ const emit = defineEmits<{
   "open-thread": [roomId: string, threadRootId: string];
 }>();
 const askNeedsMe = desktopIpc.room?.askMyWorkNeedsMe;
+const localSessions = desktopIpc.room?.getMyWorkLocalSessions;
+const openLocalSession = desktopIpc.room?.openMyWorkLocalSession;
 const api: MyWorkApi = {
   read: (query) => {
     const read = desktopIpc.room?.getMyWork;
@@ -34,6 +36,14 @@ const api: MyWorkApi = {
         askNeedsMe: (
           card: Parameters<NonNullable<MyWorkApi["askNeedsMe"]>>[0],
         ) => askNeedsMe(card.room_id, card.task_id),
+      }
+    : {}),
+  // Sessions on this computer: read and opened by the main process, never sent to the server.
+  ...(localSessions ? { localSessions: () => localSessions() } : {}),
+  ...(openLocalSession
+    ? {
+        openSession: (session: Parameters<NonNullable<MyWorkApi["openSession"]>>[0]) =>
+          openLocalSession(session.provider, session.id),
       }
     : {}),
 };

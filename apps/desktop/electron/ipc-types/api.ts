@@ -353,6 +353,10 @@ export interface DesktopApi {
     getMyWork?: (query?: DesktopMyWorkQuery) => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkPage>;
     /** PR6: Jev reads who a My work card waits on. Optional so a newer renderer degrades on an older main process. */
     askMyWorkNeedsMe?: (roomId: string, taskId: string) => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkJevNeedsMe>;
+    /** My work: Claude Code sessions and Codex threads on this computer, in bound project folders. Read on this computer only. */
+    getMyWorkLocalSessions?: () => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkLocalSession[]>;
+    /** Opens one of those sessions in Claude Code or Codex. */
+    openMyWorkLocalSession?: (provider: import("../../../../shared/ticket-connectors.mjs").MyWorkSessionProvider, id: string) => Promise<void>;
     /** PR6: accept or reject a Jev suggestion on a card (a room admin). */
     decideTaskJevLink?: (roomIdentifier: string, taskId: string, prUrl: string, decision: "accept" | "reject") => Promise<void>;
     /** Room ticket filters (ticket connectors). Local rooms have none. */
