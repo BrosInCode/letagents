@@ -18,7 +18,7 @@ async function source(path) {
 test("manual release builds never publish, even when dispatched on a release tag", async () => {
   const workflow = parse(await source(join(repositoryRoot, ".github/workflows/desktop-release.yml")));
   assert.equal(workflow.jobs.publish.if, "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')");
-  assert.deepEqual(workflow.jobs.publish.needs, ["build-macos", "build-windows"]);
+  assert.deepEqual(workflow.jobs.publish.needs, ["build-macos", "verify-macos-dmg", "build-windows"]);
   assert.deepEqual(workflow.jobs["build-windows"].needs, ["build-macos", "build-native-windows"]);
   for (const job of ["build-macos", "build-windows"]) {
     assert.equal(workflow.jobs[job].permissions.contents, "read");
@@ -60,6 +60,33 @@ test("the Windows release job installs, smoke-checks and uploads the installer w
   assert.match(job.steps[packageStep].run, /LETAGENTS_DAEMON_PIPE_ADDON_BUILD="\$\{RUNNER_TEMP\}\/daemon-pipe\/letagents-daemon-pipe\.node"/);
   const openCode = job.steps.find(step => step.name === "Install the locked OpenCode runtime").run;
   assert.match(openCode, /LETAGENTS_OPENCODE_BIN=\$\{RUNNER_TEMP\}\/opencode\/node_modules\/opencode-ai\/bin\/opencode\.exe/);
+});
+
+test("each finished DMG passes its first-launch check on its own architecture before anything is published", async () => {
+  const workflow = parse(await source(join(repositoryRoot, ".github/workflows/desktop-release.yml")));
+  const job = workflow.jobs["verify-macos-dmg"];
+  assert.ok(job, "desktop-release.yml must check the DMGs before publication");
+  assert.deepEqual(job.needs, ["build-macos"]);
+  assert.ok(workflow.jobs.publish.needs.includes("verify-macos-dmg"), "the publish job must wait for the DMG check");
+  assert.equal(job.if, undefined, "the check must not be skipped");
+  assert.equal(job["continue-on-error"], undefined, "a failed check must stop publication");
+  assert.deepEqual(job.permissions, { contents: "read" });
+  // The same runners as the builds, so each DMG starts natively, not under Rosetta.
+  assert.equal(job["runs-on"], "${{ matrix.runner }}");
+  assert.deepEqual(job.strategy.matrix.include, workflow.jobs["build-macos"].strategy.matrix.include);
+  assert.doesNotMatch(JSON.stringify(job), /secrets\./, "the check needs no secrets");
+  const download = job.steps.find(step => step.name === "Download the finished release artifacts");
+  assert.equal(download.with.name, "desktop-release-${{ matrix.arch }}", "the check uses the uploaded DMG, not a build folder");
+  const check = job.steps.find(step => step.name === "Check and first-launch the app from the DMG");
+  assert.match(check.run, /node apps\/desktop\/electron\/scripts\/macos-dmg-first-launch\.mjs/);
+  assert.match(check.run, /--arch "\$\{EXPECTED_ARCH\}"/);
+  assert.match(check.run, /--dmg "\$\{RUNNER_TEMP\}\/desktop-release\/LetAgents-\$\{version\}-darwin-\$\{EXPECTED_ARCH\}\.dmg"/);
+  assert.doesNotMatch(check.run, /--unsigned|--keep|--timeout-ms/, "the release check runs every check with the default limit");
+  for (const step of job.steps) {
+    assert.equal(step.if, undefined, `${step.name ?? step.uses} must not be skipped`);
+    assert.equal(step["continue-on-error"], undefined, `${step.name ?? step.uses} must fail the job`);
+    assert.doesNotMatch(step.run ?? "", /\bnpm\b|\bnpx\b/, "the check installs no package");
+  }
 });
 
 test("release ref validation accepts manual candidates while rejecting incorrect pushed tags and architectures", async () => {

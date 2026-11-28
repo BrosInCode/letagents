@@ -218,7 +218,8 @@ assert(
 console.log(`> ${executable} (LETAGENTS_DESKTOP_SMOKE_CHECK=1)`);
 const smoke = await new Promise((resolvePromise, reject) => {
   const child = spawn(executable, [], {
-    env: { ...process.env, LETAGENTS_DESKTOP_SMOKE_CHECK: "1", LETAGENTS_DESKTOP_SMOKE_DEBUG: "1", ELECTRON_ENABLE_LOGGING: "1" },
+    // A missing Codex, so no Codex of this machine runs during the smoke check.
+    env: { ...process.env, LETAGENTS_CODEX_BIN: join(installDirectory, "no-codex", "codex.exe"), LETAGENTS_DESKTOP_SMOKE_CHECK: "1", LETAGENTS_DESKTOP_SMOKE_DEBUG: "1", ELECTRON_ENABLE_LOGGING: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
