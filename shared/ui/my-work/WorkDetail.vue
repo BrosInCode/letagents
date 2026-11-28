@@ -100,6 +100,44 @@
             </p>
           </section>
           <section
+            v-if="sessions?.length"
+            class="work-detail-section"
+            aria-label="Sessions on this computer"
+            data-testid="my-work-detail-sessions"
+          >
+            <h3>On this computer</h3>
+            <div
+              v-for="session in sessions"
+              :key="sessionKey(session)"
+              class="work-session-line"
+            >
+              <ChatAvatar
+                :name="sessionProviderLabel(session.provider)"
+                agent
+                :provider="session.provider"
+              />
+              <span class="work-session-text"
+                ><strong>{{ sessionTitle(session) }}</strong
+                ><small :data-tone="sessionTone(session, now ?? Date.now())"
+                  ><span class="work-session-dot" aria-hidden="true" />{{
+                    sessionStateLabel(session, now ?? Date.now())
+                  }}</small
+                ></span
+              ><button
+                v-if="canOpenSession"
+                type="button"
+                class="work-text-button"
+                :aria-label="`Open ${sessionTitle(session)} in ${sessionProviderLabel(session.provider)}`"
+                @click="emit('open-session', session)"
+              >
+                Open <WorkIcon name="external" />
+              </button>
+            </div>
+            <p v-if="sessionError" class="work-session-error" role="alert">
+              {{ sessionError }}
+            </p>
+          </section>
+          <section
             v-if="card.pull_requests.length"
             class="work-detail-section"
             aria-label="Pull requests"
@@ -279,6 +317,7 @@ import { computed, onScopeDispose, ref, watch } from "vue";
 import {
   trackerProviderLabel,
   type MyWorkCard,
+  type MyWorkLocalSession,
 } from "../../ticket-connectors.mjs";
 import ChatAvatar from "../ChatAvatar.vue";
 import WorkIcon from "./WorkIcon.vue";
@@ -292,6 +331,11 @@ import {
   pullRequestStateLabel,
   reviewSummaryLabel,
   safeWorkUrl,
+  sessionKey,
+  sessionProviderLabel,
+  sessionStateLabel,
+  sessionTitle,
+  sessionTone,
   workDate,
   workGroup,
   workGroups,
@@ -306,11 +350,17 @@ const props = defineProps<{
   hasConnections: boolean;
   api: MyWorkApi;
   titleId: string;
+  /** Desktop: the sessions on this computer that work on the card's pull requests. */
+  sessions?: MyWorkLocalSession[];
+  now?: number;
+  canOpenSession?: boolean;
+  sessionError?: string;
 }>();
 const emit = defineEmits<{
   close: [];
   "open-card": [card: MyWorkCard];
   "open-thread": [card: MyWorkCard, id: string];
+  "open-session": [session: MyWorkLocalSession];
 }>();
 const tab = ref<"overview" | "updates">("overview");
 const reviewUrl = computed(() =>

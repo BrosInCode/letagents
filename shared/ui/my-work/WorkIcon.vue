@@ -30,5 +30,6 @@ const paths: Record<string, string> = {
     "M8 5a2 2 0 1 1-4 0 2 2 0 0 1 4 0 M8 19a2 2 0 1 1-4 0 2 2 0 0 1 4 0 M20 19a2 2 0 1 1-4 0 2 2 0 0 1 4 0 M6 7v10 M18 17v-6a6 6 0 0 0-6-6 m3-3-3 3 3 3",
   external: "M8 5H4v15h15v-4 M13 4h7v7 M20 4 10 14",
   arrow: "M4 12h16 m-6-6 6 6-6 6",
+  laptop: "M5 6h14v9H5Z M3 18h18",
 };
 </script>

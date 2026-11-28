@@ -30,6 +30,7 @@ import {
   testDesktopRoomTrackerFilter,
 } from "../rooms/tracker-filters.js";
 import { askDesktopMyWorkNeedsMe, getDesktopMyWork } from "../rooms/my-work.js";
+import { getDesktopLocalWorkSessions, openDesktopLocalWorkSession } from "../my-work/local-sessions.js";
 import { disconnectRemoteMcpConnection, listRemoteMcpConnections } from "../mcp-connections.js";
 
 /** Connectors: the account's tracker connections (Jira, Linear, GitHub Issues), room ticket filters, and My work. */
@@ -56,6 +57,9 @@ export function registerTicketConnectorIpcHandlers(targetIpcMain: IpcMain): void
   targetIpcMain.handle("desktop:connectors:jev-metrics", () => getTrackerJevMetrics());
   targetIpcMain.handle("desktop:room:my-work", (_event, query) => getDesktopMyWork(query));
   targetIpcMain.handle("desktop:room:my-work-needs-me", (_event, roomId, taskId) => askDesktopMyWorkNeedsMe(roomId, taskId));
+  // My work: Claude Code sessions and Codex threads on this computer. Read here; never sent to the server.
+  targetIpcMain.handle("desktop:my-work:local-sessions", () => getDesktopLocalWorkSessions());
+  targetIpcMain.handle("desktop:my-work:open-session", (_event, provider, id) => openDesktopLocalWorkSession(provider, id));
   targetIpcMain.handle("desktop:room:decide-task-jev-link", (_event, roomIdentifier, taskId, prUrl, decision) =>
     decideDesktopTaskJevLink(roomIdentifier, taskId, prUrl, decision));
   targetIpcMain.handle("desktop:room:get-task-ticket", (_event, roomIdentifier, taskId) => getDesktopRoomTaskTicket(roomIdentifier, taskId));
