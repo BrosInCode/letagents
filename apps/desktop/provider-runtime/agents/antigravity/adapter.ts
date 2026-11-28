@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ClaudePermissionObservation, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
-import type { ProviderUsage } from "../../../shared/provider-usage.js";
+import type { ProviderUsage, ProviderUsageReadOptions } from "../../../shared/provider-usage.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 import { PROCESS_ENDED_DURING_TURN, ProviderTurnControlError, type ProviderContinuationRef, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderTurnControlOptions, type ProviderTurnControlResult, type RoomTurnFileAccess, type RoomTurnImageDelivery, type SupervisedProviderAdapter } from "../provider-adapter.js";
 import { delay } from "../provider-evidence.js";
@@ -16,6 +16,7 @@ import { AcpRpcError, acpRecord, acpString } from "./acp-connection.js";
 import { AntigravityAdapterBase } from "./adapter-base.js";
 import type { AntigravityActiveTurn, AntigravityHandle } from "./handle.js";
 import { antigravityPromptBlocks, boundedAntigravityRoomTurnPrompt, classifyAntigravityTurn } from "./turn-results.js";
+import { antigravityStepErrorMessage, isAntigravityUsageLimitText } from "./turn-errors.js";
 import { parseAntigravityQuota } from "./usage.js";
 import { antigravityPathForms, antigravityPermissionOption, type AntigravityNativePermissionRequest } from "./permissions.js";
 
@@ -44,14 +45,17 @@ export class AntigravityProviderAdapter extends AntigravityAdapterBase implement
 
   /**
    * The context window comes from agy's own `usage_update`s. The account's
-   * limits are read with `agy -p /quota` at most every 30 seconds; a read that
-   * takes longer than a moment leaves the last reading, which the window shows as stale.
+   * limits need `agy -p /quota`, which is not ACP and calls Google, so they are
+   * read only when the owner opens the Overview (`refreshAccount`), and at most
+   * every 30 seconds. Every other read answers with the last reading. A read
+   * that takes longer than a moment leaves the last reading, which the window
+   * shows as stale.
    */
-  async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
+  async readUsage(providerHandle: ProviderHandle, options?: ProviderUsageReadOptions): Promise<ProviderUsage | null> {
     const handle = this.handles.get(providerHandle.workAttemptId);
     if (!handle || handle !== providerHandle || handle.terminal) return null;
     const now = Date.parse(this.deps.now());
-    if (!handle.quotaRead && (!handle.quotaReadAt || now - handle.quotaReadAt >= 30_000)) {
+    if (options?.refreshAccount === true && !handle.quotaRead && (!handle.quotaReadAt || now - handle.quotaReadAt >= 30_000)) {
       handle.quotaReadAt = now;
       const reading = this.deps.readQuota(this.agyBin).then((output) => {
         const windows = parseAntigravityQuota(output, handle.currentModel, this.deps.now());
@@ -231,8 +235,11 @@ export class AntigravityProviderAdapter extends AntigravityAdapterBase implement
       (error: unknown) => {
         // An error answer to this prompt is the agent's own ending of it. A closed
         // connection is not: the process ended, and recovery reports that.
-        if (error instanceof AcpRpcError) return { stopReason: null, error: error.message.slice(0, 600) || "Antigravity failed this turn." };
-        throw error;
+        if (!(error instanceof AcpRpcError)) throw error;
+        // A usage limit that agy answers here gets the same words as one in an error step.
+        const text = `${error.message} ${typeof error.data === "string" ? error.data : JSON.stringify(error.data ?? "")}`;
+        return { stopReason: null, error: isAntigravityUsageLimitText(text) ? antigravityStepErrorMessage(text)
+          : error.message.slice(0, 600) || "Antigravity failed this turn." };
       },
     );
     const stagedFiles = new Set((request.attachments ?? []).flatMap((attachment) =>

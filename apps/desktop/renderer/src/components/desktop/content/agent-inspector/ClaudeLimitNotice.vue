@@ -7,7 +7,7 @@
       <p v-if="notice.reset" class="claude-limit-reset">Resets {{ notice.reset }}</p>
       <div class="claude-limit-actions">
         <button v-if="canSwitch" type="button" class="claude-limit-switch" @click="emit('switch-model')">Change model <ArrowRight :size="13" aria-hidden="true" /></button>
-        <a :href="CLAUDE_USAGE_URL" @click="openUsage">Manage Claude usage <ArrowUpRight :size="13" aria-hidden="true" /></a>
+        <a v-if="notice.usageLink" :href="notice.usageLink.url" @click="openUsage($event, notice.usageLink)">{{ notice.usageLink.label }} <ArrowUpRight :size="13" aria-hidden="true" /></a>
         <slot />
       </div>
     </div>
@@ -16,18 +16,18 @@
 
 <script setup lang="ts">
 import { ArrowRight, ArrowUpRight, CircleAlert } from "@lucide/vue";
-import { CLAUDE_USAGE_URL, type ClaudeLimitNotice } from "../../../../domain/claude-usage-limit";
+import type { ClaudeLimitNotice } from "../../../../domain/claude-usage-limit";
 import { desktopIpc } from "../../../../ipc";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 
 defineProps<{ notice: ClaudeLimitNotice; agentName?: string; canSwitch?: boolean }>();
 const emit = defineEmits<{ "switch-model": [] }>();
 const { pushActionToast } = useDesktopActionToasts();
-function openUsage(event: MouseEvent) {
+function openUsage(event: MouseEvent, link: { url: string; label: string }) {
   const open = desktopIpc.app?.openExternalUrl;
   if (!open) return;
   event.preventDefault();
-  void open(CLAUDE_USAGE_URL).catch(() => pushActionToast("Couldn’t open Claude usage.", "error"));
+  void open(link.url).catch(() => pushActionToast("Couldn’t open the usage page.", "error"));
 }
 </script>
 

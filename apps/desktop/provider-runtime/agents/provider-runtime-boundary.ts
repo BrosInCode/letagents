@@ -23,7 +23,7 @@ import { z } from "zod";
 import { assertPlainWireValue, assertWireBoundarySchema, jsonValueSchema } from "#daemon-contract/wire-boundary.js";
 import type { ControlProbeResult, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 import type { ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest } from "../../shared/provider-permissions.js";
-import type { ProviderUsage } from "../../shared/provider-usage.js";
+import type { ProviderUsage, ProviderUsageReadOptions } from "../../shared/provider-usage.js";
 import {
   ROOM_TURN_IMAGE_MAX_BYTES, ROOM_TURN_IMAGES_MAX_TOTAL_BYTES, ROOM_TURN_RECENT_IMAGE_LIMIT, ROOM_TURN_RECENT_IMAGES_MAX_BYTES,
 } from "./provider-adapter.js";
@@ -775,9 +775,9 @@ export class ProviderRuntimeBoundary {
     return guarded("probeControl", "result", await this.required("probeControl")(handle));
   }
 
-  async readUsage(ref: ProviderRuntimeRef): Promise<ProviderUsage | null> {
+  async readUsage(ref: ProviderRuntimeRef, options?: ProviderUsageReadOptions): Promise<ProviderUsage | null> {
     const handle = this.held(ref);
-    return guarded("readUsage", "result", await this.required("readUsage")(handle));
+    return guarded("readUsage", "result", await this.required("readUsage")(handle, { refreshAccount: options?.refreshAccount === true }));
   }
 
   async stopBackgroundCommand(ref: ProviderRuntimeRef, taskId: string): Promise<"stopping" | "not_running" | "failed"> {

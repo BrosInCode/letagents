@@ -2363,6 +2363,9 @@ test("agent inspector detail is capability-negotiated and preserves its optional
     const detail = await client.getAgentInspectorDetail({ entryId: "agent_1", roomId: "room_1", sourceMessageId: null });
     assert.equal(detail.availability, "not_loaded");
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.get_agent_inspector_detail")?.params, { entry_id: "agent_1", room_id: "room_1", source_message_id: null });
+    await client.getAgentInspectorDetail({ entryId: "agent_1", roomId: "room_1", sourceMessageId: null, refreshAccountUsage: true });
+    assert.deepEqual(wire.requests.filter((request) => request.method === "supervisor.get_agent_inspector_detail").at(-1)?.params,
+      { entry_id: "agent_1", room_id: "room_1", source_message_id: null, refresh_account_usage: true }, "only the Overview's read asks for the account's limits");
     await assert.rejects(() => client.getAgentInspectorDetail({ entryId: "", roomId: "room_1" }), /exact non-empty/);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });

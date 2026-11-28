@@ -562,6 +562,7 @@ import { isOwnedLocalRoomAgent, supervisorEntriesKey } from "./add-agent/supervi
 import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
 import ClaudeLimitNotice from "./agent-inspector/ClaudeLimitNotice.vue";
 import { claudeLimitNotice, type ClaudeLimitNotice as ClaudeLimitDetails } from "../../../domain/claude-usage-limit";
+import { antigravityLimitNotice } from "../../../domain/antigravity-usage-limit";
 import "../../../../../../../shared/ui/chat-palette.css";
 import { useChatStyling } from "../../../../../../../shared/ui/chat-styling";
 const chatStyling = useChatStyling();
@@ -828,7 +829,7 @@ const deliveryLimitNotices = computed(() => {
   for (const receipt of visibleDeliveryReceipts.value) {
     if (receipt.state !== "acknowledged_failed" && receipt.state !== "blocked") continue;
     const entry = supervisorEntries?.entries.value.find(agent => agent.id === receipt.agentId);
-    const notice = claudeLimitNotice(receipt.error, entry?.provider);
+    const notice = claudeLimitNotice(receipt.error, entry?.provider) ?? antigravityLimitNotice(receipt.error, entry?.provider);
     if (notice) notices.set(receipt.agentId, notice);
   }
   return notices;

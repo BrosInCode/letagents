@@ -295,7 +295,7 @@ export class ProviderActionFailure extends Error {
 export type ProviderRuntimeCustody = { state: "absent" } | { state: "owned" | "retired"; handle: ProviderActionHandle } | { state: "unknown" };
 
 export interface ProviderActionPort {
-  readUsage?(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
+  readUsage?(handle: ProviderActionHandle, options?: import("../shared/provider-usage.js").ProviderUsageReadOptions): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
   /** Stop a command that the agent runs in the background (see ProviderAdapter.stopBackgroundCommand). */
   stopBackgroundCommand?(handle: ProviderActionHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
   compactionProgress?(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null;

@@ -283,6 +283,19 @@ test("the inspector wires a lazily-subscribed Live tab that starts and stops wit
   assert.match(shell, /onAgentStream\?\.\(\(batch\)/);
 });
 
+test("only the Overview asks for the account's limits: on open and when its tab is picked, never on a poll", () => {
+  const surface = source("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue");
+  const host = source("../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
+  const shell = roomShellSource();
+  assert.match(/function applyInitialTab\(\): void \{[\s\S]*?\n\}/.exec(surface)?.[0] ?? "", /if \(selectedTab\.value === "overview"\) emit\("overview-selected"\)/);
+  assert.match(surface, /if \(tab === "overview"\) emit\("overview-selected"\)/);
+  assert.equal((host.match(/@overview-selected="emit\('overview-selected'\)"/g) ?? []).length, 2);
+  assert.match(shell, /@overview-selected="loadAgentInspectorWorkDetail\(agentInspectorWorkSourceMessageId, true, false, true\)"/);
+  // Every other read leaves the fourth argument out: it answers with the last reading.
+  const calls = shell.match(/loadAgentInspectorWorkDetail\([^)]*\)/g) ?? [];
+  assert.deepEqual(calls.filter((call) => /,\s*true\)$/.test(call) && call.split(",").length === 4), ["loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId, true, false, true)"]);
+});
+
 test("describeLiveToolCall unwraps Cursor's mcpToolCall and strips the per-turn server alias", () => {
   const reply = describeLiveToolCall("mcpToolCall", {
     name: "letagents_supervised_c0a7e4ba0ff9289147837706-complete_room_turn",

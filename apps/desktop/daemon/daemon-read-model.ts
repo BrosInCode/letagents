@@ -32,7 +32,7 @@ import type {
 const OWNER_SETUP_END_ATTENTION_AFTER_MS = 30_000;
 
 export type DaemonReadModelPorts = {
-  readUsage?(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
+  readUsage?(handle: ProviderActionHandle, options: import("../shared/provider-usage.js").ProviderUsageReadOptions): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(entry: DaemonManifestEntry): DaemonManifestEntryView["provider_progress"];
   /** The live start-up progress of the entry's latest launch in this daemon. */
   launchProgress?(entry: DaemonManifestEntry): DaemonManifestEntryView["launch_progress"];
@@ -132,10 +132,15 @@ export class DaemonReadModel {
     };
   }
 
+  /**
+   * `refreshAccountUsage` is set when the owner opens the Overview: only then
+   * may the adapter read the account's limits from the provider again.
+   */
   async inspectorDetail(
     entryId: string,
     roomId: string,
     sourceMessageId: string | null,
+    refreshAccountUsage = false,
   ) {
     if (!entryId.trim()
       || !roomId.trim()
@@ -162,7 +167,7 @@ export class DaemonReadModel {
     const [detail, usage] = await Promise.all([
       this.ports.inbox.detail(entryId, roomId, sourceMessageId, runtimeFence),
       handle && handle.workAttemptId === entry.work_attempt_id && handle.providerContinuationId === continuation
-        ? this.ports.readUsage?.(handle).catch(() => null) ?? null : null,
+        ? this.ports.readUsage?.(handle, { refreshAccount: refreshAccountUsage }).catch(() => null) ?? null : null,
     ]);
     const current = await this.ports.manifest.getEntry(entryId);
     const valid = current?.room_id === roomId && current.provider_ref?.execution_generation_id === execution

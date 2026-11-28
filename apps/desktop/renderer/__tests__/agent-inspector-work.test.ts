@@ -240,6 +240,27 @@ test("manual and background detail reads share identity and retain explicit sour
   assert.deepEqual(calls, ["a", "b", "reopened"]);
 });
 
+test("an Overview read of the account's limits never joins a read without them", async () => {
+  const requests = createAgentInspectorDetailRequest();
+  const pending = deferred<void>();
+  const intents: Array<{ name: string; followDefaultSource: boolean; refreshAccountUsage: boolean }> = [];
+  const read = (name: string, wait?: Promise<void>) => async (intent: { followDefaultSource: boolean; refreshAccountUsage: boolean }) => {
+    intents.push({ name, followDefaultSource: intent.followDefaultSource, refreshAccountUsage: intent.refreshAccountUsage });
+    await wait;
+  };
+  const opened = requests.run("entry/source/birth-a", true, read("open", pending.promise));
+  const overview = requests.run("entry/source/birth-a", false, read("overview", pending.promise), true);
+  assert.notEqual(overview, opened, "the limits are read by a read of their own");
+  assert.equal(requests.run("entry/source/birth-a", false, read("poll")), overview, "a background read joins the Overview read");
+  assert.equal(requests.run("entry/source/birth-a", false, read("again"), true), overview, "so does a second Overview read");
+  pending.resolve();
+  await Promise.all([opened, overview]);
+  assert.deepEqual(intents, [
+    { name: "open", followDefaultSource: true, refreshAccountUsage: false },
+    { name: "overview", followDefaultSource: true, refreshAccountUsage: true },
+  ]);
+});
+
 test("timestamp-only snapshots do not refetch detail but durable work changes do", async () => {
   const entry = { observedState: "running", condition: "ready", bindingUpdatedAt: "1",
     nativeLiveness: { observedAt: "1" }, roomAgentState: { connection: { observedAt: "1" }, ingress: { observedAt: "1" },

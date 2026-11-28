@@ -195,7 +195,7 @@ export function useRoomShellInspectorActions(context: unknown) {
   async function loadAgentInspectorWorkDetail(
     sourceMessageId: string | null = agentInspectorWorkSourceMessageId.value,
     force = false,
-    followDefaultSource = true,
+    followDefaultSource = true, refreshAccountUsage = false, // only the Overview sets it: the provider's account limits may be read again
   ): Promise<void> {
     const target = selectedAgentDetailTarget.value;
     const projection = app.selectedAgentDetailProjection.value;
@@ -218,7 +218,7 @@ export function useRoomShellInspectorActions(context: unknown) {
       const currentDetail = await readAgentInspectorWorkDetail({
         entry: projection.entry, source: sourceMessageId, generation: daemonGeneration,
         previous: agentInspectorWorkResource.value,
-        read: () => desktopIpc.supervisor.getAgentInspectorDetail({ entryId: target.supervisorEntryId, roomId: projection.roomId, sourceMessageId }),
+        read: () => desktopIpc.supervisor.getAgentInspectorDetail({ entryId: target.supervisorEntryId, roomId: projection.roomId, sourceMessageId, refreshAccountUsage: intent.refreshAccountUsage }),
         isCurrent,
         write: resource => { agentInspectorWorkResource.value = resource; },
       });
@@ -228,7 +228,7 @@ export function useRoomShellInspectorActions(context: unknown) {
         agentInspectorWorkSourceMessageId.value = defaultSource;
         void loadAgentInspectorWorkDetail(defaultSource);
       }
-    });
+    }, refreshAccountUsage);
   }
 
   async function revealAgentInspectorWorkMessage(canonicalMessageId: string): Promise<void> {

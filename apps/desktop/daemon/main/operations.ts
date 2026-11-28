@@ -57,8 +57,8 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
   }
 
   /** Inspector reads are exact-entry scoped; a room mismatch never falls back to history. */
-  protected async getAgentInspectorDetail(entryId: string, roomId: string, sourceMessageId: string | null) {
-    return this.readModel.inspectorDetail(entryId, roomId, sourceMessageId);
+  protected async getAgentInspectorDetail(entryId: string, roomId: string, sourceMessageId: string | null, refreshAccountUsage = false) {
+    return this.readModel.inspectorDetail(entryId, roomId, sourceMessageId, refreshAccountUsage);
   }
 
   protected async exactActiveBoundedContext(input: {

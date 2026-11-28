@@ -584,6 +584,8 @@ export const DAEMON_RPC_METHODS = {
       entry_id: z.string(),
       room_id: z.string(),
       source_message_id: z.string().nullable(),
+      /** The owner opened the Overview: the provider's account limits may be read again. */
+      refresh_account_usage: z.boolean().optional(),
     }),
     result: daemonInspectorDetailSchema,
     timeout: FIXED_RICH_READ,

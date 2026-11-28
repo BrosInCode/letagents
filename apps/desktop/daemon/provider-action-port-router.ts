@@ -797,7 +797,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return await remembered.boundary.stopBackgroundCommand(remembered.runtime, taskId) ?? "not_running";
   }
 
-  async readUsage(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null> {
+  async readUsage(handle: ProviderActionHandle, options?: import("../shared/provider-usage.js").ProviderUsageReadOptions): Promise<import("../shared/provider-usage.js").ProviderUsage | null> {
     const remembered = this.required(handle);
     const continuation = handle.providerContinuationId;
     const connection = structuredClone(handle.providerConnection);
@@ -810,7 +810,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const runtimeId = remembered.runtime.runtimeId;
     if (!sameConnection(remembered.boundary.inspectIfHeld(remembered.runtime)?.providerConnection, connection)
       || this.exits.get(runtimeId)?.exited) return null;
-    const usage = remembered.boundary.has("readUsage") ? await remembered.boundary.readUsage(remembered.runtime) ?? null : null;
+    const usage = remembered.boundary.has("readUsage") ? await remembered.boundary.readUsage(remembered.runtime, options) ?? null : null;
     const current = this.handles.get(handle.workAttemptId);
     const now = current === remembered ? remembered.boundary.inspectIfHeld(remembered.runtime) : null;
     return now !== null && now.providerContinuationId === continuation

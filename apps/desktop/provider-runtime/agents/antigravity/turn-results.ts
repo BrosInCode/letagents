@@ -65,6 +65,9 @@ export type AntigravityTurnEvidence = {
   error: string | null;
 };
 
+/** What a refused turn with no text of its own says: agy reports an exhausted quota as a refusal. */
+export const ANTIGRAVITY_REFUSED_TURN = "Antigravity refused this turn. You may have run out of usage.";
+
 /**
  * Classify a finished prompt. `end_turn` with text is the answer. agy ends a
  * turn with no text right after a refused tool call, and reports an exhausted
@@ -79,7 +82,7 @@ export function classifyAntigravityTurn(turnId: string, providerContinuationId: 
     case "cancelled":
       return { turnId, providerContinuationId, outcome: "interrupted", text: null, evidence: "stream", error: "The turn was stopped." };
     case "refusal":
-      return failed(text || "Antigravity refused this turn. The account may have reached its usage limit.", { refusal: true });
+      return failed(text || ANTIGRAVITY_REFUSED_TURN, { refusal: true });
     case "max_tokens":
       return failed(NO_REPLY_FAILURE.outputLimit);
     case "max_turn_requests":

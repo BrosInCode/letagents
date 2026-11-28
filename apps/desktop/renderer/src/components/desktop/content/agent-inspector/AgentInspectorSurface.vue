@@ -150,6 +150,7 @@ import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResourc
 import { savedModelLabel } from "../../../../domain/claude-model-labels";
 import ClaudeLimitNotice from "./ClaudeLimitNotice.vue";
 import { claudeLimitNotice, isFableModel, isFableUsageWindow } from "../../../../domain/claude-usage-limit";
+import { antigravityLimitNotice } from "../../../../domain/antigravity-usage-limit";
 import { latestFailedAgentMessage } from "../../../../domain/room-message-receipts";
 import { formatDate } from "../../../../domain/formatters";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
@@ -203,6 +204,8 @@ const emit = defineEmits<{
   action: [intent: AgentInspectorActionIntent];
   "live-selected": [];
   "live-dismissed": [];
+  /** The Overview is shown: on open, or when the owner picks its tab. */
+  "overview-selected": [];
   "work-selected": [];
   "work-retry": [];
   "work-source-select": [sourceMessageId: string];
@@ -235,8 +238,11 @@ const retryClock = useSecondClock(() => Boolean(agentScheduledRetry(props.projec
 const signal = computed(() => agentInspectorSignal(props.projection, retryClock.value));
 const limitNotice = computed(() => {
   const { provider, entry } = props.projection;
-  if (!["claude-code", "claude"].includes(provider) || signal.value.state === "stale") return null;
+  if (!["claude-code", "claude", "antigravity"].includes(provider) || signal.value.state === "stale") return null;
   if (signal.value.state !== "message_failed" && signal.value.state !== "needs_attention") return null;
+  if (provider === "antigravity") {
+    return antigravityLimitNotice(latestFailedAgentMessage(entry)?.error, provider) ?? antigravityLimitNotice(entry.lastError, provider);
+  }
   const notice = claudeLimitNotice(latestFailedAgentMessage(entry)?.error, provider) ?? claudeLimitNotice(entry.lastError, provider);
   if (!notice || notice.modelFamily !== "fable") return notice;
   if (hasSwitchedFromLimit.value) return { ...notice, detail: "The last request reached this limit. Ask again to try it with the new model." };
@@ -316,6 +322,7 @@ function applyInitialTab(): void {
   if (effects.emitLiveSelected) {
     emit("live-selected");
   }
+  if (selectedTab.value === "overview") emit("overview-selected");
   if (selectedTab.value === "settings") emit("settings-selected");
 }
 
@@ -339,6 +346,7 @@ function selectTab(tab: InspectorTab): void {
   selectedTab.value = tab;
   if (tab !== "diagnostics") recoveryOptionsRequested.value = false;
   if (tab === "live") emit("live-selected");
+  if (tab === "overview") emit("overview-selected");
   if (tab === "work" || tab === "diagnostics") emit("work-selected");
   if (tab === "settings") emit("settings-selected");
 }

@@ -16,7 +16,7 @@
     </div>
     <p v-else class="agent-inspector-work-empty">{{ loading ? 'Reading account limits…' : 'Account limits are not available from this provider yet.' }}</p>
     <p v-if="fable && !hasFableWindow && !loading" class="inspector-usage-stale">Claude hasn’t reported a Fable-specific reading for this session.</p>
-    <p v-if="windows.length && accountStale" class="inspector-usage-stale">Last reported limits · waiting for an update</p>
+    <p v-if="windows.length && accountStale" class="inspector-usage-stale">{{ accountStaleLabel }}</p>
     <div class="agent-inspector-context-heading"><span>Context window</span><span>{{ contextLabel }}</span></div>
     <div class="agent-inspector-context-meter" :data-compacting="isCompacting" :data-compacted="usage?.compaction === 'compacted'"
       :role="contextPercent === null ? undefined : 'meter'" :aria-label="contextPercent === null ? undefined : 'Context window used'"
@@ -35,7 +35,8 @@ import { formatCompactNumber, formatDate } from "../../../../domain/formatters";
 import { computed } from "vue";
 import type { ProviderUsage } from "../../../../../../shared/provider-usage";
 import { isFableModel, isFableUsageWindow } from "../../../../domain/claude-usage-limit";
-const props = defineProps<{ usage: ProviderUsage | null; model?: string | null; loading: boolean; stale: boolean; compacting: boolean }>();
+// `readOnOpen`: the provider's limits are read only when the Overview opens (Antigravity), not while it stays open.
+const props = defineProps<{ usage: ProviderUsage | null; model?: string | null; loading: boolean; stale: boolean; compacting: boolean; readOnOpen?: boolean }>();
 const fable = computed(() => isFableModel(props.model));
 const windows = computed(() => {
   const items = props.usage?.account.windows ?? [];
@@ -45,8 +46,16 @@ const windows = computed(() => {
 });
 const hasFableWindow = computed(() => windows.value.some(item => isFableUsageWindow(item.id)));
 const isCompacting = computed(() => !props.stale && (props.compacting || props.usage?.compaction === 'compacting'));
-const accountStale = computed(() => props.stale || props.usage?.account.state === 'stale'
-  || windows.value.some(window => Date.now() - Date.parse(window.observedAt) > 90_000 || (window.resetsAt && Date.parse(window.resetsAt) <= Date.now())));
+const accountAged = computed(() => windows.value.some(window => Date.now() - Date.parse(window.observedAt) > 90_000));
+const accountResetPassed = computed(() => windows.value.some(window => window.resetsAt && Date.parse(window.resetsAt) <= Date.now()));
+const accountStale = computed(() => props.stale || props.usage?.account.state === 'stale' || accountAged.value || accountResetPassed.value);
+// Limits read on open get no update while the Overview stays open, whatever made the reading old: only another open reads them.
+const accountStaleLabel = computed(() => {
+  if (!props.readOnOpen || props.stale) return 'Last reported limits · waiting for an update';
+  const readAt = new Date(Math.min(...windows.value.map(window => Date.parse(window.observedAt))));
+  const today = readAt.toDateString() === new Date().toDateString();
+  return `Limits as of ${formatDate(today ? 'hourMinute' : 'weekdayHourMinute', readAt)} · open the Overview again to update them`;
+});
 const contextPercent = computed(() => {
   const context = props.usage?.context;
   return context?.capacityTokens ? Math.min(100, Math.round(context.usedTokens / context.capacityTokens * 100)) : null;

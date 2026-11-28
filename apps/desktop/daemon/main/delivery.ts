@@ -150,7 +150,7 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
         },
       ) : null;
     this.readModel = new DaemonReadModel({
-      readUsage: (handle) => this.providerPort?.readUsage?.(handle) ?? Promise.resolve(null),
+      readUsage: (handle, options) => this.providerPort?.readUsage?.(handle, options) ?? Promise.resolve(null),
       compactionProgress: (entry) => entry.work_attempt_id
         ? this.providerPort?.compactionProgress?.(entry.work_attempt_id, entry.provider) ?? null : null,
       launchProgress: (entry) => launchProgress.view(entry.id, this.convergencePacer.snapshot("launch")),
