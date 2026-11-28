@@ -11,6 +11,7 @@ import {
   buildLocalGitRoomIdentifier,
   buildLocalGitRoomInfo,
   buildRepoStatus,
+  displayRemoteUrl,
   normalizeGitRemoteToRoomIdentifier,
   parseGitStatusPorcelainV2,
   parseGitShortStat,
@@ -221,7 +222,8 @@ test("resolveRoomIdentifierFromPath opens no-remote repositories as local Git ro
 
     assert.equal(resolved.repoRoot, canonicalPath(tempDir));
     assert.equal(resolved.source, "local_git");
-    assert.equal(resolved.warning, null);
+    assert.deepEqual(resolved.localReason, { kind: "no_remote" });
+    assert.match(resolved.warning ?? "", /has no remote.*opened it as a local room.*open the folder you cloned from GitHub/);
     assert.match(resolved.roomIdentifier, /^git-room:local:[a-f0-9]{16}:branch:/);
     assert.equal(resolved.gitRoom?.accessMode, "local");
     assert.equal(resolved.gitRoom?.ref.name, "feature/player-3d-presentation");
@@ -688,4 +690,91 @@ test("normalizeGitRemoteToRoomIdentifier keeps SSH config aliases and look-alike
     normalizeGitRemoteToRoomIdentifier("https://gist.github.com/Owner/Repo.git"),
     "gist.github.com/Owner/Repo",
   );
+});
+
+test("normalizeGitRemoteToRoomIdentifier reads scp-like remotes with any user or none", () => {
+  const remotes = [
+    "github.com:Kd/TIMA.git",
+    "kd@github.com:Kd/TIMA.git",
+    "org-123@github.com:Kd/TIMA.git",
+    "git@github.com:/Kd/TIMA.git",
+    "git@github.com:Kd/TIMA",
+  ];
+  for (const remote of remotes) {
+    assert.equal(normalizeGitRemoteToRoomIdentifier(remote), "github.com/kd/tima", remote);
+  }
+  assert.equal(normalizeGitRemoteToRoomIdentifier("github-kd:Kd/TIMA.git"), "github-kd/Kd/TIMA");
+  // A Windows drive path and local paths are not SSH remotes.
+  assert.equal(normalizeGitRemoteToRoomIdentifier("C:\\repos\\tima"), null);
+  assert.equal(normalizeGitRemoteToRoomIdentifier("../tima.git"), null);
+  assert.equal(normalizeGitRemoteToRoomIdentifier("/srv/git/tima.git"), null);
+});
+
+function gitRepoWithRemotes(prefix: string, remotes: Record<string, string>): string {
+  const tempDir = mkdtempSync(join(tmpdir(), prefix));
+  execFileSync("git", ["init", "-b", "main"], { cwd: tempDir, stdio: "ignore" });
+  for (const [name, url] of Object.entries(remotes)) {
+    execFileSync("git", ["remote", "add", name, url], { cwd: tempDir, stdio: "ignore" });
+  }
+  return tempDir;
+}
+
+test("resolveRoomIdentifierFromPath follows an SSH config alias to its GitHub room", async () => {
+  const tempDir = gitRepoWithRemotes("letagents-ssh-alias-room-", { origin: "git@github-kd:Kd/TIMA.git" });
+  try {
+    const asked: string[] = [];
+    const resolved = await resolveRoomIdentifierFromPath(tempDir, {
+      resolveSshHostName: async (alias) => { asked.push(alias); return "github.com"; },
+    });
+    assert.deepEqual(asked, ["github-kd"]);
+    assert.equal(resolved.source, "git_remote");
+    assert.equal(resolved.roomIdentifier, "github.com/kd/tima");
+    assert.equal(resolved.localReason, null);
+
+    // An alias for another host, or one ssh cannot resolve, keeps the alias.
+    for (const hostName of ["gitlab.com", null]) {
+      const other = await resolveRoomIdentifierFromPath(tempDir, { resolveSshHostName: async () => hostName });
+      assert.equal(other.roomIdentifier, "github-kd/Kd/TIMA", String(hostName));
+    }
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveRoomIdentifierFromPath asks ssh only for an SSH remote that is not github.com", async () => {
+  for (const origin of ["https://github.com/Kd/TIMA.git", "git@github.com:Kd/TIMA.git", "https://gitlab.example/kd/tima.git"]) {
+    const tempDir = gitRepoWithRemotes("letagents-no-ssh-lookup-", { origin });
+    try {
+      const resolved = await resolveRoomIdentifierFromPath(tempDir, {
+        resolveSshHostName: async () => { throw new Error(`ssh was asked for ${origin}`); },
+      });
+      assert.equal(resolved.source, "git_remote", origin);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("resolveRoomIdentifierFromPath says why a repository opened as a local room", async () => {
+  const noOrigin = gitRepoWithRemotes("letagents-no-origin-room-", { upstream: "git@github.com:kd/tima.git", backup: "../backup.git" });
+  const unreadable = gitRepoWithRemotes("letagents-unreadable-origin-room-", { origin: "../tima.git" });
+  try {
+    const first = await resolveRoomIdentifierFromPath(noOrigin);
+    assert.equal(first.source, "local_git");
+    assert.deepEqual(first.localReason, { kind: "no_origin", remotes: ["backup", "upstream"] });
+    assert.match(first.warning ?? "", /no remote named origin \(it has backup, upstream\)/);
+
+    const second = await resolveRoomIdentifierFromPath(unreadable);
+    assert.equal(second.source, "local_git");
+    assert.deepEqual(second.localReason, { kind: "unreadable_origin", url: "../tima.git" });
+    assert.match(second.warning ?? "", /could not read the origin remote \.\.\/tima\.git/);
+  } finally {
+    rmSync(noOrigin, { recursive: true, force: true });
+    rmSync(unreadable, { recursive: true, force: true });
+  }
+});
+
+test("displayRemoteUrl removes credentials from a remote URL", () => {
+  assert.equal(displayRemoteUrl("https://kd:ghp_secret@example.com/kd/tima.git"), "https://example.com/kd/tima.git");
+  assert.equal(displayRemoteUrl("../tima.git"), "../tima.git");
 });

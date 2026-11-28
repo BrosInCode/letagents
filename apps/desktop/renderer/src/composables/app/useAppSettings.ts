@@ -3,6 +3,7 @@ import { useDesktopSetupOnboarding } from "../useDesktopSetupOnboarding";
 import { appAgentEntry } from "../../domain/desktop-navigation";
 import { appAgentRefreshTargets } from "../../domain/app-agent";
 import { desktopIpc } from "../../ipc/index.js";
+import { safeUserVisibleErrorDetail } from "../../domain/user-visible-error";
 import type { AppContextOf } from "./context";
 
 /** Settings surface: chat storage, the App Agent, and desktop updates. */
@@ -272,10 +273,7 @@ export function useAppSettingsActions(context: unknown) {
         || (app.selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) !== roomIdentifier) return;
       chatStorageFeedback.value = {
         state: "error",
-        message:
-          error instanceof Error
-            ? error.message
-            : "Local chat could not be published.",
+        message: safeUserVisibleErrorDetail(error, "Local chat could not be published."),
       };
     } finally {
       chatStorageBusy.value = false;
