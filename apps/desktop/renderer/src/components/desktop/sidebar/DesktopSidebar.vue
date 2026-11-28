@@ -6,6 +6,9 @@
     :data-selection-active="selectionActive"
     data-testid="desktop-sidebar"
     @keydown.esc="handleSidebarEscape"
+    @wheel.passive="endStartupReveal"
+    @pointerdown="endStartupReveal"
+    @keydown="endStartupReveal"
     @dragover="clearSidebarDropTarget"
     @drop.prevent="cancelSidebarDrag"
   >
@@ -1656,7 +1659,19 @@ function revealRow(row: HTMLElement): void {
   row.scrollIntoView({ block: list ? "center" : "nearest", inline: "nearest", behavior: "instant" });
 }
 watch(() => props.activeEntry.id, (entryId) => requestActiveEntryReveal(entryId), { flush: "post" });
-watch(() => props.projectEntries, () => { if (pendingActiveReveal) void revealActiveEntry(); }, { flush: "post" });
+watch(() => props.projectEntries, () => {
+  if (pendingActiveReveal) void revealActiveEntry();
+  else if (Date.now() < startupRevealUntil) requestActiveEntryReveal(props.activeEntry.id);
+}, { flush: "post" });
+// At start the room list arrives in steps (the open room first, the rest
+// later), so the first reveal can find the open room on screen and then lose
+// it under the rooms that arrive after it. Until the person touches the
+// sidebar, each new list brings the open room back into view; a row already
+// on screen stays put.
+let startupRevealUntil = Date.now() + 15_000;
+function endStartupReveal(): void {
+  startupRevealUntil = 0;
+}
 
 // New room navigation reveals the promoted project.
 watch(() => props.revealRequest, async (request, _previous, onCleanup) => {

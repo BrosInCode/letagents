@@ -45,7 +45,13 @@ describe("desktop sidebar active room reveal contract", () => {
   it("opens the collapsed group that hides the row, and tries again when the room list arrives", () => {
     const reveal = sidebarSource.match(/async function revealActiveEntry\(\)[\s\S]*?\n\}/)?.[0] ?? "";
     assert.match(reveal, /if \(!row\) \{[\s\S]*?revealSearchResult\(entry\);[\s\S]*?await nextTick\(\);/);
-    assert.match(sidebarSource, /watch\(\(\) => props\.projectEntries, \(\) => \{ if \(pendingActiveReveal\) void revealActiveEntry\(\); \}/);
+    assert.match(sidebarSource, /watch\(\(\) => props\.projectEntries, \(\) => \{\s*if \(pendingActiveReveal\) void revealActiveEntry\(\);/);
+  });
+
+  it("keeps the open room in view while the room list arrives in steps, until the person touches the sidebar", () => {
+    assert.match(sidebarSource, /else if \(Date\.now\(\) < startupRevealUntil\) requestActiveEntryReveal\(props\.activeEntry\.id\);/);
+    assert.match(sidebarSource, /let startupRevealUntil = Date\.now\(\) \+ 15_000;/);
+    assert.match(sidebarSource, /@wheel\.passive="endStartupReveal"\s*@pointerdown="endStartupReveal"\s*@keydown="endStartupReveal"/);
   });
 
   it("reveals only rooms, not Inbox, Messages or Settings", () => {
