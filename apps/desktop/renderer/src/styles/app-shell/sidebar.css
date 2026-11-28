@@ -135,6 +135,8 @@
 }
 
 .sidebar-navigation {
+  /* The "you are here" dock sits over the room list's edge. */
+  position: relative;
   display: grid;
   grid-row: 2;
   grid-template-rows: auto minmax(0, 1fr);
@@ -677,19 +679,58 @@
   }
 }
 
-.pinned-room[data-active="true"],
-.project-row[data-active="true"],
-.room-row[data-active="true"],
 .sidebar-row[data-active="true"] {
   border-color: transparent;
   background: var(--sidebar-selected);
   box-shadow: none;
 }
 
-.pinned-room[data-active="true"] .pin-mark,
-.project-row[data-active="true"] .project-icon,
+/* The open room is the strongest row in the list: a raised surface with a
+   hairline edge and a marker at its left edge. Hover stays a flat tint, so the
+   open room differs in shape, not only in a slightly darker grey. */
+.pinned-room[data-active="true"],
+.project-row[data-active="true"],
+.room-row[data-active="true"] {
+  border-color: transparent;
+  background: var(--sidebar-selected);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--text) 9%, transparent),
+    0 1px 2px light-dark(rgb(0 0 0 / 0.06), rgb(0 0 0 / 0.35));
+}
+
+/* A drop indicator uses ::after too; while one shows on this row, it wins. */
+:is(.pinned-room, .project-row, .room-row)[data-active="true"]:not([data-drop-position])::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 3px;
+  height: 16px;
+  border-radius: 0 3px 3px 0;
+  background: var(--text);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.pinned-room[data-active="true"] .pinned-title,
+.project-row[data-active="true"] .project-name,
+.room-row[data-active="true"] .room-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* The project that holds the open room shows an open folder in full colour. */
+.pinned-room[data-holds-active="true"] .pin-mark,
+.project-row[data-holds-active="true"] .project-icon,
+.room-row[data-active="true"] .sidebar-child-icon,
 .sidebar-row[data-active="true"] .system-icon {
   color: var(--text);
+}
+
+/* Three tones instead of one: read rooms step back, rooms with something new
+   and the open room's project stay full colour. */
+:is(.pinned-room, .project-row):not([data-holds-active="true"], [data-unread="true"], :has(.room-unread-badge, .room-unread-dot)) :is(.pinned-title, .project-name) {
+  color: var(--text-secondary);
 }
 
 @media (hover: hover) and (pointer: fine) {

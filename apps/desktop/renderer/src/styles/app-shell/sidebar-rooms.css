@@ -330,11 +330,6 @@
   background: transparent;
 }
 
-.room-focus[data-active="true"] {
-  background: var(--sidebar-selected);
-  box-shadow: none;
-}
-
 /* Several rooms picked for a batch action. */
 :is(.pinned-room, .project-row, .room-row)[data-selected="true"] {
   background: color-mix(in srgb, var(--sidebar-selection) 12%, transparent);

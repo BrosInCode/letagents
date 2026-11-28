@@ -14,9 +14,25 @@ describe("desktop sidebar active room reveal contract", () => {
     assert.match(sidebarSource, /onMounted\(\(\) => \{[^}]*requestActiveEntryReveal\(props\.activeEntry\.id\);/);
   });
 
-  it("moves the list only as far as needed, so a row already on screen stays put", () => {
+  it("leaves a row already on screen in place and brings a hidden row to the middle of the list", () => {
     const reveal = sidebarSource.match(/async function revealActiveEntry\(\)[\s\S]*?\n\}/)?.[0] ?? "";
-    assert.match(reveal, /row\.scrollIntoView\(\{ block: "nearest", inline: "nearest", behavior: "instant" \}\)/);
+    assert.match(reveal, /revealRow\(row\);/);
+    const revealRow = sidebarSource.match(/function revealRow\(row: HTMLElement\): void \{[\s\S]*?\n\}/)?.[0] ?? "";
+    assert.match(revealRow, /if \(list && sidebarRowFullyVisible\(row\.getBoundingClientRect\(\), list\.getBoundingClientRect\(\)\)\) return;/);
+    assert.match(revealRow, /row\.scrollIntoView\(\{ block: list \? "center" : "nearest", inline: "nearest", behavior: "instant" \}\)/);
+  });
+
+  it("docks a copy of the open room at the list edge while its row is scrolled away", () => {
+    assert.match(sidebarSource, /<div class="sidebar-room-sections" ref="roomSectionsElement">/);
+    assert.match(sidebarSource, /<SidebarActiveRoomDock[\s\S]*?:edge="activeRoomDock\.edge\.value"[\s\S]*?@reveal="activeRoomDock\.reveal"/);
+    // A child room hidden in a collapsed group is stood in for by its project's row.
+    assert.match(sidebarSource, /if \(row && !row\.closest\("\.sidebar-reveal-leave-active"\)\) return row;\s*return activeProject\.value \? sidebarRow\(activeProject\.value\.parent\.id\) : null;/);
+    assert.match(sidebarSource, /enabled: \(\) => props\.activeEntry\.type === "room" && !props\.selectionActive/);
+  });
+
+  it("opens the folder of the project that holds the open room", () => {
+    assert.equal(sidebarSource.match(/<FolderOpen v-if="activeProject\?\.id === project\.id" \/><Folder v-else \/>/g)?.length, 2);
+    assert.equal(sidebarSource.match(/:data-holds-active="activeProject\?\.id === project\.id"/g)?.length, 2);
   });
 
   it("opens the collapsed group that hides the row, and tries again when the room list arrives", () => {
