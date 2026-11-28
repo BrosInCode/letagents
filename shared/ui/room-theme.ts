@@ -10,6 +10,8 @@ export function roomThemeStyle(id: RoomThemeId | null) {
     "--workspace-canvas": `light-dark(color-mix(in srgb, ${theme.lightAccent} 5%, white), color-mix(in srgb, ${theme.accent} 8%, #0a0a0a))`,
     "--workspace-sidebar": `light-dark(color-mix(in srgb, ${theme.lightAccent} 9%, white), color-mix(in srgb, ${theme.accent} 5%, #111111))`,
     "--workspace-composer": `light-dark(color-mix(in srgb, ${theme.lightAccent} 9%, white), color-mix(in srgb, ${theme.accent} 14%, #151515))`,
+    // Menus, pop-ups and small dialogs: the composer's tint, one step lighter.
+    "--workspace-elevated": `light-dark(color-mix(in srgb, ${theme.lightAccent} 6%, white), color-mix(in srgb, ${theme.accent} 12%, #1a1a1a))`,
     "--workspace-border": `light-dark(color-mix(in srgb, ${theme.lightAccent} 28%, white), color-mix(in srgb, ${theme.accent} 30%, #171717))`,
   } : {};
 }

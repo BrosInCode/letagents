@@ -6,6 +6,7 @@ import type {
 import { avatarInitials } from "../../../../../shared/chat-appearance";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { startRefusalReason } from "./agent-home-harness";
+import { openModelLaunchFailureReason } from "./open-model-launch-error";
 import { supervisedLaunchProgress } from "./supervised-launch";
 import { thisComputerLabel } from "./supervised-agents-support";
 
@@ -163,15 +164,17 @@ function slotNote(ahead: number | null): string | null {
 }
 
 function failureReason(action: AgentStartupAction, entry: Entry): string {
+  const openModelReason = openModelLaunchFailureReason(entry.lastError, entry.provider);
+  if (openModelReason) return openModelReason;
   const runtime = agentRuntimeLabel(entry.provider);
   if (action === "sign_in") return `${runtime} is not signed in on ${thisComputerLabel()}.`;
   if (action === "install") return `${runtime} could not be found on ${thisComputerLabel()}.`;
-  return safeManifestDetail(supervisedLaunchProgress(entry).failureDetail);
+  return safeManifestDetail(supervisedLaunchProgress(entry).failureDetail ?? entry.lastError ?? null, entry.provider);
 }
 
 /** Scheduler internals are no reason a person can act on. */
-function safeManifestDetail(detail: string | null): string {
-  const refusal = startRefusalReason(detail);
+function safeManifestDetail(detail: string | null, provider?: string): string {
+  const refusal = startRefusalReason(detail) ?? openModelLaunchFailureReason(detail, provider);
   if (refusal) return refusal;
   if (!detail?.trim() || /convergence scheduler failure|scheduler failure:/i.test(detail)) return "The start did not finish.";
   return detail;
@@ -327,11 +330,14 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
     const index = stages.findIndex((stage) => stage.key === failedKey);
     currentIndex = index >= 0 ? index : currentIndex;
     status = "failed";
-    failure = { reason: failureReason(progress.failure.action, entry), action: progress.failure.action };
+    const openModelReason = openModelLaunchFailureReason(entry.lastError, entry.provider);
+    const action = openModelReason ? "retry" : progress.failure.action;
+    failure = { reason: openModelReason ?? failureReason(action, entry), action };
   } else if (!allDone && manifest.failed && !manifest.recoverableBlocked && !retryPending) {
     status = "failed";
-    const action = manifestFailureAction(entry);
-    failure = { reason: action === "retry" ? safeManifestDetail(manifest.failureDetail) : failureReason(action, entry), action };
+    const openModelReason = openModelLaunchFailureReason(entry.lastError, entry.provider);
+    const action = openModelReason ? "retry" : manifestFailureAction(entry);
+    failure = { reason: openModelReason ?? (action === "retry" ? safeManifestDetail(manifest.failureDetail, entry.provider) : failureReason(action, entry)), action };
   }
   if (!allDone) {
     for (let index = currentIndex + 1; index < stages.length; index += 1) {

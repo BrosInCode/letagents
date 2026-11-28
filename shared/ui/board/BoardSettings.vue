@@ -1,5 +1,5 @@
 <template>
-  <dialog ref="dialog" class="board-settings board-dialog" aria-labelledby="board-settings-title" @cancel="cancel" @click="backdrop" @keydown="escape">
+  <dialog ref="dialog" class="board-settings board-dialog" aria-labelledby="board-settings-title" @cancel="cancel" @pointerdown="backdrop.pointerdown" @click="backdrop.click" @keydown="escape">
     <header class="board-dialog-header"><h2 id="board-settings-title">Board settings</h2><button class="board-icon-button" type="button" aria-label="Close board settings" :disabled="saving" @click="close"><BoardIcon name="close" /></button></header>
     <nav class="board-settings-tabs" aria-label="Board settings" role="tablist"><button v-for="item in tabs" :id="`${prefix}-tab-${item}`" :key="item" type="button" role="tab" :aria-controls="`${prefix}-${item}`" :aria-selected="tab === item" :tabindex="tab === item ? 0 : -1" @click="tab = item" @keydown="tabKey($event, item)">{{ item }}</button></nav>
     <div class="board-dialog-body">
@@ -77,6 +77,7 @@ import BoardReleaseSettings from './BoardReleaseSettings.vue';
 import './release-queue.css';
 import BoardOptionsMenu from './BoardOptionsMenu.vue';
 import { columnTone, replaceBoardColumns, sprintDates } from './model';
+import { backdropClose } from './dialog-backdrop';
 const props = defineProps<{ open: boolean; initialTab?: string; startAdding?: boolean; snapshot: BoardPlanningSnapshot; save: (document: BoardPlanningDocument) => Promise<boolean> }>();
 const emit = defineEmits<{ close: [] }>();
 const dialog = ref<HTMLDialogElement>(), prefix = `board-settings-${useId()}`, tabs = ['Columns', 'Sprints', 'Releases'];
@@ -97,7 +98,7 @@ watch(() => props.open, async open => {
 function focus(id: string) { void nextTick(() => dialog.value?.querySelector<HTMLElement>(`[id="${prefix}-${id}"]`)?.focus({ preventScroll: true })); }
 function close() { if (!saving.value) { cancelDrag(); emit('close'); } }
 function cancel(event: Event) { event.preventDefault(); close(); }
-function backdrop(event: MouseEvent) { if (event.target === dialog.value) { const rect = dialog.value.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) close(); } }
+const backdrop = backdropClose(() => dialog.value, close);
 function escape(event: KeyboardEvent) { if (event.key !== 'Escape' || saving.value) return; if (dragging.value) { cancelDrag(); event.preventDefault(); event.stopPropagation(); } else if (removing.value) { keepColumn(); event.preventDefault(); event.stopPropagation(); } else if (adding.value) { cancelAdd(); event.preventDefault(); event.stopPropagation(); } }
 function tabKey(event: KeyboardEvent, item: string) { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; event.preventDefault(); const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (tabs.indexOf(item) + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length; tab.value = tabs[index]; focus(`tab-${tab.value}`); }
 function countFor(id: string) { return props.snapshot.taskFacts.filter(task => boardTaskColumn(draft.value, task) === id).length; }

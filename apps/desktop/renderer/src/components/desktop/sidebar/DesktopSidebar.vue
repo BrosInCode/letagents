@@ -16,6 +16,7 @@
     <div class="sidebar-topbar">
       <span class="sidebar-wordmark">letagents.</span>
       <div class="sidebar-topbar-actions">
+        <HistoryArrows />
         <button class="sidebar-search-button" type="button" aria-label="Find a room" aria-haspopup="dialog"
           :aria-expanded="switcherOpen" :title="`Find a room (${switchShortcutLabel})`"
           :aria-keyshortcuts="switchAriaKeyShortcuts" data-testid="sidebar-search-button" @click="openRoomSwitcher">
@@ -530,6 +531,7 @@
 </template>
 
 <script setup lang="ts">
+import HistoryArrows from "../controls/HistoryArrows.vue";
 import RoomUnreadBadge from "./RoomUnreadBadge.vue";
 import {
   Archive,

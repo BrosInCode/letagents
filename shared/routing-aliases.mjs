@@ -1,24 +1,8 @@
 import { createHash } from "node:crypto";
 
-/**
- * Stable cross-engine fold: ASCII A-Z only. Unicode case conversion varies by
- * JS/ICU/PostgreSQL version and locale, so non-ASCII aliases are deliberately
- * case-sensitive while exact non-ASCII labels still match everywhere.
- */
-function foldRoutingText(value) {
-  return String(value ?? "").replace(/[A-Z]/g, (character) =>
-    String.fromCharCode(character.charCodeAt(0) + 32));
-}
+import { normalizeRoutingHandle, normalizeRoutingSender } from "./agent-names.mjs";
 
-export function normalizeRoutingSender(value) {
-  return foldRoutingText(typeof value === "string" ? value.trim() : "")
-    .replace(/\s+/g, " ");
-}
-
-export function normalizeRoutingHandle(value) {
-  return foldRoutingText(typeof value === "string" ? value.trim() : "")
-    .replace(/[^a-z0-9_.:/-]+/g, "");
-}
+export { normalizeRoutingHandle, normalizeRoutingSender };
 
 function routingIdentityAliasInputs(identity) {
   const agentKey = typeof identity?.agentKey === "string"

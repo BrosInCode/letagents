@@ -64,11 +64,11 @@
         <div v-for="task in backlogTasks" :key="task.id" class="board-backlog-row" :data-board-task-id="task.id"><BoardIcon :name="planning(task.id).type || 'task'" /><button class="board-backlog-title" type="button" @click="emit('select', task.id)"><strong>{{ task.title }}</strong><small>{{ task.ticket?.key || task.id.replace(/^task_/, 'T') }}</small></button><a v-if="safeWorkUrl(task.pr?.url || null)" class="board-pr" :href="task.pr!.url" @click.prevent="openExternal(task.pr!.url)"><BoardIcon name="pr" />{{ task.pr!.number ? '#' + task.pr!.number : 'PR' }}</a><button class="board-button" type="button" @click="openPlan(task.id, $event)">Plan</button><button v-if="task.allowedTransitions.some(a => a.targetStatus === 'accepted')" class="board-button" type="button" :disabled="locked" @click="runTransition(task, task.allowedTransitions.find(a => a.targetStatus === 'accepted')!.id, $event)">Accept</button></div>
       </div>
       <BoardSettings :open="settingsOpen" :initial-tab="settingsTab" :start-adding="settingsAdd" :snapshot="snapshot" :save="save" @close="settingsOpen = false" />
-      <dialog ref="sprintDetails" class="board-dialog board-sprint-detail-dialog" aria-labelledby="board-sprint-detail-title" @click="sprintBackdrop" @cancel="sprintDetails?.close()">
+      <dialog ref="sprintDetails" class="board-dialog board-sprint-detail-dialog" aria-labelledby="board-sprint-detail-title" @pointerdown="sprintBackdrop.pointerdown" @click="sprintBackdrop.click" @cancel="sprintDetails?.close()">
         <header class="board-dialog-header"><h2 id="board-sprint-detail-title">{{ selectedSprint?.name }}</h2><button class="board-icon-button" type="button" aria-label="Close sprint details" @click="sprintDetails?.close()"><BoardIcon name="close" /></button></header>
         <div v-if="selectedSprint" class="board-dialog-body board-sprint-detail-body"><span class="board-sprint-state">{{ sprintState(selectedSprint) }}</span><p>{{ sprintDates(selectedSprint) }}</p><p v-if="selectedSprint.goal">{{ selectedSprint.goal }}</p><p v-if="selectedSprint.source" class="board-settings-hint">{{ selectedSprint.source.provider === 'jira' ? 'Jira' : 'Linear' }} · imported tasks in this room</p><button class="board-button" type="button" @click="sprintDetails?.close(); openSettings('Sprints')">Sprint settings</button></div>
       </dialog>
-      <dialog ref="planDialog" class="board-dialog board-task-plan-dialog" aria-labelledby="board-plan-title" @close="planTaskId = null">
+      <dialog ref="planDialog" class="board-dialog board-task-plan-dialog" aria-labelledby="board-plan-title" @pointerdown="planBackdrop.pointerdown" @click="planBackdrop.click" @close="planTaskId = null">
         <header class="board-dialog-header"><h2 id="board-plan-title">Sprint &amp; estimate</h2><button class="board-icon-button" type="button" aria-label="Close task planning" @click="planDialog?.close()"><BoardIcon name="close" /></button></header>
         <div class="board-dialog-body"><h3>{{ allTasks.find(t => t.id === planTaskId)?.title }}</h3><BoardTaskPlanning v-if="planTaskId" :key="planTaskId" :task-id="planTaskId" :snapshot="snapshot" :save="save" /></div>
       </dialog>
@@ -89,6 +89,7 @@ import BoardAssignees from './BoardAssignees.vue';
 import BoardSettings from './BoardSettings.vue';
 import BoardOptionsMenu from './BoardOptionsMenu.vue';
 import BoardTaskPlanning from './BoardTaskPlanning.vue';
+import { backdropClose } from './dialog-backdrop';
 import { columnTone, matchesSprint, replaceBoardColumns, sprintDates, taskOwner, taskIsBlocked } from './model';
 import { useBoardWorkspace } from './useBoardWorkspace';
 import type { BoardServices, BoardTask } from './types';
@@ -160,7 +161,8 @@ async function applyCreatedPlanning(id: string, fields: BoardTaskPlanningFields)
 }
 function openSettings(tab: string, add = false) { settingsTab.value = tab; settingsAdd.value = add; settingsOpen.value = true; }
 function sprintState(sprint: BoardSprint) { return sprint.source?.stale ? 'Status unavailable' : sprint.state === 'future' ? 'Upcoming' : sprint.state === 'active' ? 'Active' : 'Completed'; }
-function sprintBackdrop(event: MouseEvent) { if (event.target === sprintDetails.value) { const rect = sprintDetails.value.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) sprintDetails.value.close(); } }
+const sprintBackdrop = backdropClose(() => sprintDetails.value, () => sprintDetails.value?.close());
+const planBackdrop = backdropClose(() => planDialog.value, () => planDialog.value?.close());
 async function refresh() { emit('refresh'); await load(); }
 async function openExternal(url: string) { const safe = safeWorkUrl(url); if (!safe) return; try { await props.services.openExternal(safe); } catch { actionError.value = 'The link could not be opened.'; } }
 function closeOtherActions(event: Event) { const detail = event.currentTarget as HTMLDetailsElement; if (detail.open) surface.value?.querySelectorAll<HTMLDetailsElement>('.board-card-actions[open]').forEach(other => { if (other !== detail) other.open = false; }); }

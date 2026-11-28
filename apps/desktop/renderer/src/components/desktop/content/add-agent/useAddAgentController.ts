@@ -20,6 +20,7 @@ import { useAddAgentConfiguration } from "./useAddAgentConfiguration";
 import { useAddAgentSetup } from "./useAddAgentSetup";
 import { useAddAgentPresentation } from "./useAddAgentPresentation";
 import { useProviderSignIn } from "./useProviderSignIn";
+import type { RoomHeldName } from "../../../../domain/room-held-names";
 import { contextualAddAgentError } from "./add-agent-errors";
 import {
   canStartNewSupervisedLaunch,
@@ -39,6 +40,8 @@ export interface AddAgentModalProps {
   initialProviderId?: DesktopAgentProviderId | null;
   /** Opens on this section of the provider's settings. */
   initialSection?: "open-model" | null;
+  /** Names people and agents in the room already answer to. */
+  heldNames?: readonly RoomHeldName[];
 }
 
 export interface AddAgentModalEvents {

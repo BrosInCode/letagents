@@ -394,6 +394,44 @@
   font-size: 0.88rem;
 }
 
+/*
+ * The first-load ink and the card that answers it (AuthOnboardingView). The ink
+ * fades out, then the card rises in with its own entrance (auth-card-in). A
+ * retry keeps the card on screen, so the ink only comes back for a new room.
+ */
+.auth-stage-leave-active.ink-room-loader {
+  transition: opacity 280ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.auth-stage-leave-active.auth-access-card {
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+.auth-stage-enter-active.ink-room-loader {
+  transition: opacity 360ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.auth-stage-leave-to,
+.auth-stage-enter-from.ink-room-loader {
+  opacity: 0;
+}
+.auth-stage-leave-to.auth-access-card {
+  transform: translateY(4px) scale(0.99);
+}
+
+/*
+ * The room arrived: this screen is pinned over it (room-loader-handoff.ts) and
+ * fades out, so the room shows through instead of cutting in. The ink first
+ * lets its mark go as smoke, so its fade starts a moment later.
+ */
+.room-arrival-leave-active {
+  background: var(--bg);
+  transition: opacity 240ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.room-arrival-leave-active:has(.ink-room-loader) {
+  transition: opacity 520ms cubic-bezier(0.23, 1, 0.32, 1) 240ms;
+}
+.room-arrival-leave-to {
+  opacity: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .auth-access-card {
     animation: none;
@@ -402,6 +440,18 @@
   .auth-state-enter-active,
   .auth-state-leave-active {
     transition: opacity 150ms ease;
+  }
+
+  .auth-stage-enter-active.ink-room-loader,
+  .auth-stage-leave-active.ink-room-loader,
+  .auth-stage-leave-active.auth-access-card,
+  .room-arrival-leave-active,
+  .room-arrival-leave-active:has(.ink-room-loader) {
+    transition: opacity 150ms ease;
+  }
+
+  .auth-stage-leave-to.auth-access-card {
+    transform: none;
   }
 
   .auth-state-enter-from,

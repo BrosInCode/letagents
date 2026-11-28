@@ -20,8 +20,18 @@
       </div>
       <footer class="room-guide-actions">
         <button type="button" class="room-guide-quiet" @click="finish">{{ welcomeShown ? "Not now" : "Skip" }}</button>
-        <span v-if="!welcomeShown" class="room-guide-dots" aria-hidden="true">
-          <i v-for="(_, dot) in availableSteps" :key="dot" :data-on="dot === index" />
+        <span v-if="!welcomeShown" class="room-guide-dots" role="group" aria-label="Tour steps">
+          <button
+            v-for="(item, dot) in availableSteps"
+            :key="dot"
+            type="button"
+            class="room-guide-dot"
+            :data-on="dot === index"
+            :aria-label="`Step ${dot + 1}: ${item.title}`"
+            :aria-current="dot === index ? 'step' : undefined"
+            :data-testid="`room-guide-dot-${dot}`"
+            @click="goToStep(dot)"
+          ><i /></button>
         </span>
         <button ref="nextButton" type="button" class="room-guide-next" data-testid="room-guide-next" @click="advance">
           {{ welcomeShown ? "Show me around" : index + 1 === availableSteps.length ? "Done" : "Next" }}
@@ -352,6 +362,12 @@ function advance() {
   if (index.value + 1 >= availableSteps.value.length) return finish();
   showStep(index.value + 1);
 }
+/** A dot jumps to its step, back or forward. */
+function goToStep(dot: number) {
+  if (welcomeShown.value || dot === index.value || dot < 0 || dot >= availableSteps.value.length) return;
+  window.clearTimeout(welcomeTimer);
+  showStep(dot);
+}
 function onKey(event: KeyboardEvent) {
   if (event.key === "ArrowRight") { event.preventDefault(); advance(); }
   else if (event.key === "ArrowLeft" && !welcomeShown.value && index.value > 0) { event.preventDefault(); showStep(index.value - 1); }
@@ -453,9 +469,15 @@ defineExpose({ open, close });
 .room-guide-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 16px; }
 .room-guide-quiet { min-height: 32px; padding: 0 2px; border: 0; background: none; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
 .room-guide-quiet:hover { color: var(--text); }
-.room-guide-dots { display: flex; gap: 5px; }
-.room-guide-dots i { width: 5px; height: 5px; border-radius: 50%; background: color-mix(in srgb, var(--text) 20%, transparent); transition: background-color 220ms ease, transform 220ms ease; }
-.room-guide-dots i[data-on="true"] { background: var(--text); transform: scale(1.25); }
+.room-guide-dots { display: flex; }
+/* Each dot is a button with a larger target than the dot it shows (the row keeps its 5 px spacing). */
+.room-guide-dot { display: grid; place-items: center; width: 14px; height: 22px; margin: 0 -2px; padding: 0; border: 0; border-radius: 6px; background: none; cursor: pointer; }
+.room-guide-dot i { width: 5px; height: 5px; border-radius: 50%; background: color-mix(in srgb, var(--text) 20%, transparent); transition: background-color 220ms ease, transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+.room-guide-dot:hover i { background: color-mix(in srgb, var(--text) 55%, transparent); }
+.room-guide-dot:active i { transform: scale(0.85); }
+.room-guide-dot[data-on="true"] { cursor: default; }
+.room-guide-dot[data-on="true"] i { background: var(--text); transform: scale(1.25); }
+.room-guide-dot:focus-visible { outline: 2px solid var(--workspace-accent, var(--text)); outline-offset: -2px; }
 .room-guide-next {
   min-height: 34px; padding: 0 14px; border: 1px solid var(--workspace-border, var(--border)); border-radius: 9px;
   background: var(--workspace-composer, var(--bg-card)); color: var(--text); font: inherit; font-size: 13px; font-weight: 560; cursor: pointer;

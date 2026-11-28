@@ -245,6 +245,39 @@ test('identity validation keeps invalid names on identity and accepts Unicode na
   assert.equal(vm.step.value, 'brain', 'code points, not UTF-16 code units, set the boundary');
 });
 
+test('a name someone in the room answers to stays on identity with a warning; the dialog never offers one', async t => {
+  const { vm, props, name, launchView } = presentation(t, { name: '', open: false, reduced: false, initialSection: undefined });
+  Object.assign(props, { heldNames: [{ name: 'Atlas', holder: 'agent' }, { name: 'EmmyMay', holder: 'person' }] });
+  props.open = true; await nextTick();
+  assert.equal(name.value, 'Scout', 'the default skips a taken name');
+
+  for (const [typed, message] of [['atlas', /An agent named Atlas is already in this room/], ['Emmy May', /EmmyMay is a person in this room/]] as const) {
+    name.value = typed; await nextTick();
+    assert.match(vm.identityError.value, message);
+    vm.showStep('brain');
+    assert.equal(vm.step.value, 'identity');
+  }
+  name.value = 'Nova'; await nextTick();
+  assert.equal(vm.identityError.value, '');
+  vm.showStep('brain');
+  assert.equal(vm.step.value, 'brain');
+
+  // A saved launch is this agent itself, already in the room under its name.
+  name.value = 'Atlas'; launchView.value = { failed: false }; await nextTick();
+  assert.equal(vm.identityError.value, '');
+});
+
+test('names that arrive after opening replace only the default the dialog chose', async t => {
+  const { props, name } = presentation(t, { name: '', open: false, reduced: false, initialSection: undefined });
+  props.open = true; await nextTick();
+  assert.equal(name.value, 'Atlas');
+  Object.assign(props, { heldNames: [{ name: 'Atlas', holder: 'agent' }] }); await nextTick();
+  assert.equal(name.value, 'Scout', 'a taken default moves');
+  name.value = 'Milo'; await nextTick();
+  Object.assign(props, { heldNames: [{ name: 'Atlas', holder: 'agent' }, { name: 'Milo', holder: 'agent' }] }); await nextTick();
+  assert.equal(name.value, 'Milo', 'a typed name is warned about, never replaced');
+});
+
 test('reversing the scene preserves the edited name and avatar without restarting the animation', async t => {
   const { vm, props, name, avatar, styles, frames, advance, counts } = presentation(t);
   name.value = 'Reviewer'; avatar.value = { kind: 'character', character: 'spark', color: 'rose' };
