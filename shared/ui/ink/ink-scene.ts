@@ -127,7 +127,7 @@ void main() {
 }`,
   display: head + `
 uniform sampler2D uTexture; uniform vec2 texelSize;
-uniform float ripple, fade, aspectRatio; uniform vec2 dotPoint;
+uniform float ripple, fade, aspectRatio; uniform vec2 dotPoint; uniform vec3 water;
 float lum(vec3 c) { return dot(c, vec3(0.3, 0.59, 0.11)); }
 void main() {
   vec3 c = texture(uTexture, vUv).rgb;
@@ -143,7 +143,7 @@ void main() {
   }
   vec3 ink = c * lit + glow / 8.0 * 0.22;
   ink = 1.0 - exp(-ink * 1.45);
-  vec3 col = vec3(0.039, 0.043, 0.039) + ink;
+  vec3 col = water + ink;
   // Sign-in succeeded: one ring of light leaves the dot.
   if (ripple > 0.0 && ripple < 1.0) {
     vec2 d = vUv - dotPoint; d.x *= aspectRatio;
@@ -151,7 +151,7 @@ void main() {
     col += vec3(0.72, 1.0, 0.88) * ring * 0.32 * (1.0 - ripple);
   }
   // Leaving for the next screen.
-  col = mix(col, vec3(0.047, 0.055, 0.051), fade);
+  col = mix(col, water + vec3(0.008, 0.012, 0.012), fade);
   o = vec4(pow(col, vec3(0.92)), 1.0);
 }`,
 };
@@ -169,6 +169,8 @@ export interface InkSceneOptions {
   markCenter?: [number, number];
   /** The mark's height as a part of the canvas height. */
   markHeight?: number;
+  /** The colour of the water behind the ink (linear rgb, 0-1). Default: a near-black green-grey. */
+  water?: [number, number, number];
 }
 export interface InkScene {
   end: number;
@@ -282,6 +284,7 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
   const markCenter: [number, number] = options.markCenter ?? [.5, .66];
   // On a tall phone the mark is kept narrower than the screen, so it does not crowd the headline.
   const markHeight = Math.min(options.markHeight ?? .3, .55 * aspect);
+  const water: [number, number, number] = options.water ?? [.039, .043, .039];
 
   function run(name: keyof typeof shaders, out: Target | null, set: (u: Uniforms, unit: (t: Target, i: number) => number) => void, texel: [number, number]) {
     const { program, uniforms } = programs[name];
@@ -412,6 +415,7 @@ export function createInkScene(canvas: HTMLCanvasElement, options: InkSceneOptio
       gl!.uniform1f(u.fade, fade);
       gl!.uniform1f(u.aspectRatio, aspect);
       gl!.uniform2f(u.dotPoint, dotX, dotY);
+      gl!.uniform3f(u.water, ...water);
     }, dye.read.texel);
   }
 

@@ -72,8 +72,9 @@ function hasTopLevelComma(value: string): boolean {
 }
 
 function inKeyframes(declaration: Declaration): boolean {
-  for (let node = declaration.parent; node; node = node.parent) {
-    if (node.type === "atrule" && /keyframes$/i.test((node as { name: string }).name)) return true;
+  for (let node: { type: string; parent?: unknown } | undefined = declaration.parent; node;
+    node = node.parent as { type: string; parent?: unknown } | undefined) {
+    if (node.type === "atrule" && /keyframes$/i.test((node as unknown as { name: string }).name)) return true;
   }
   return false;
 }

@@ -19,6 +19,16 @@ export interface UseInkSceneOptions {
    * slice at a time, and fades in once formed. For screens seen often, such as a loader.
    */
   formed?: boolean;
+  /** The colour of the water behind the ink (see InkSceneOptions.water). */
+  water?: [number, number, number];
+  /**
+   * The component ended but its canvas is still on the page: a `<Transition>` fades it out
+   * (Vue ends a leaving component at once and removes its element only after the fade).
+   * The scene keeps drawing until the canvas leaves the page, in the mode this returns
+   * (null: the current one), and only then gives its GPU context back. Without this the
+   * fading canvas lost its context and showed white.
+   */
+  leaving?: () => InkMode | null;
 }
 
 /**
@@ -55,6 +65,8 @@ export function useInkScene(options: UseInkSceneOptions) {
   let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   let lastPointer: { x: number; y: number } | null = null;
   let pendingMode: InkMode | null = null;
+  let mountedCanvas: HTMLCanvasElement | null = null;
+  let removalFrame = 0;
 
   function openingTime(now = performance.now()) {
     if (!scene) return 0;
@@ -88,7 +100,7 @@ export function useInkScene(options: UseInkSceneOptions) {
     let made: InkScene | null = null;
     try {
       const light = options.light ? options.light() : matchMedia("(max-width: 760px), (pointer: coarse)").matches;
-      made = createInkScene(canvas, { light, markCenter: mark?.center, markHeight: mark?.height });
+      made = createInkScene(canvas, { light, markCenter: mark?.center, markHeight: mark?.height, water: options.water });
     } catch (error) {
       console.error(error);
     }
@@ -140,6 +152,7 @@ export function useInkScene(options: UseInkSceneOptions) {
   function start() {
     const canvas = options.canvas.value;
     if (!canvas || scene) return;
+    mountedCanvas = canvas;
     scene = build(canvas);
     if (!scene) { fallback.value = true; return; }
     canvas.addEventListener("webglcontextlost", onContextLost, { once: true });
@@ -213,15 +226,29 @@ export function useInkScene(options: UseInkSceneOptions) {
   }
 
   onMounted(start);
+  function release() {
+    cancelAnimationFrame(removalFrame);
+    stopLive();
+    // Leaving: give the WebGL context back now instead of at garbage collection.
+    scene?.dispose(true);
+    scene = null;
+  }
   onUnmounted(() => {
     clearTimeout(rebuildTimer);
     cancelAnimationFrame(frame);
     cancelAnimationFrame(waitFrame);
-    stopLive();
     observer?.disconnect();
-    // Leaving: give the WebGL context back now instead of at garbage collection.
-    scene?.dispose(true);
-    scene = null;
+    const canvas = mountedCanvas;
+    if (!scene || !canvas?.isConnected) { release(); return; }
+    // Still on the page: a leave transition is fading it. Keep drawing until it is removed.
+    const mode = options.leaving?.() ?? null;
+    if (mode && scene.ready() && !reduced) { stopLive(); scene.setMode(mode); wake(); }
+    const until = performance.now() + 3000;
+    const waitForRemoval = () => {
+      if (canvas.isConnected && performance.now() < until) { removalFrame = requestAnimationFrame(waitForRemoval); return; }
+      release();
+    };
+    removalFrame = requestAnimationFrame(waitForRemoval);
   });
 
   return { fallback, veiled, skipped, reduced, skip, setMode, stir, pulseToward };

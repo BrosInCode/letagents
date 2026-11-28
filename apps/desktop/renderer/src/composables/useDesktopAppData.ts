@@ -104,6 +104,16 @@ const selectedSnapshotCacheLimit = 8;
 // live messages are appended to it. Keep only the newest page of a room.
 const selectedSnapshotCacheMaxMessages = 200;
 const defaultRoomSnapshotTimeoutMs = 15_000;
+/** How long a room that has arrived waits for its folder's Git status before it shows without it. */
+const repoStatusGraceMs = 1_500;
+
+/** The promise's value if it settles within `ms`, else undefined (the promise keeps running). */
+function settleWithin<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    promise.then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(undefined); });
+  });
+}
 const defaultDeliveryRepairRetryMs = 500;
 const maxDeliveryRepairRetryMs = 5_000;
 const defaultStreamBufferMaxEvents = 256;
@@ -484,13 +494,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       : snapshot;
   }
 
+  const pendingRepoStatusReads = new Map<string, Promise<RepoStatus | null>>();
+
   async function loadRootRoomContext(input: {
     roomIdentifier: string | null;
     rootPath: string | null;
     repoStatus?: RepoStatus | null;
   }): Promise<{
     snapshot: DesktopRoomSnapshot;
-    repoStatus: RepoStatus;
+    /** Null while the folder's Git status is still being read (see below). */
+    repoStatus: RepoStatus | null;
     openedRoom: DesktopRepoRoomSelection | null;
   }> {
     if (input.rootPath && desktopIpc.repos.openRoom) {
@@ -508,13 +521,38 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       }
     }
 
-    const [repoStatus, snapshot] = await Promise.all([
-      input.repoStatus ? Promise.resolve(input.repoStatus) : desktopIpc.repos.getStatus(input.rootPath),
-      getRoomSnapshot(input.roomIdentifier),
-    ]);
+    // The folder's Git status only adds project details to the room. A cold
+    // Git read can take far longer than the room (a repository with hundreds
+    // of worktrees took over 15 s), and waiting for it here timed the whole
+    // first load out as "This room didn't load" although the room had arrived
+    // in a second. So the room does not wait for it: it gets a short grace,
+    // and a later answer is applied when it comes. A failed read is no room failure.
+    // One read per folder at a time: a second caller (the selected room right
+    // after the root) shares it, and does not wait again for one already slow.
+    const statusKey = input.rootPath ?? "";
+    const pendingStatus = input.repoStatus ? undefined : pendingRepoStatusReads.get(statusKey);
+    let statusRequest: Promise<RepoStatus | null>;
+    if (input.repoStatus) statusRequest = Promise.resolve(input.repoStatus);
+    else if (pendingStatus) statusRequest = pendingStatus;
+    else {
+      statusRequest = desktopIpc.repos.getStatus(input.rootPath).catch(() => null);
+      pendingRepoStatusReads.set(statusKey, statusRequest);
+      void statusRequest.finally(() => {
+        if (pendingRepoStatusReads.get(statusKey) === statusRequest) pendingRepoStatusReads.delete(statusKey);
+      });
+    }
+    const snapshot = await getRoomSnapshot(input.roomIdentifier);
+    const repoStatus = await settleWithin(statusRequest, pendingStatus ? 0 : repoStatusGraceMs);
+    if (repoStatus === undefined) {
+      void statusRequest.then((late) => {
+        if (!late) return;
+        const rootRoom = normalizeRoomIdentifier(options.selectedRootRoomIdentifier.value);
+        if (rootRoom && rootRoom === normalizeRoomIdentifier(snapshot.roomIdentifier)) options.repoStatus.value = late;
+      });
+    }
     return {
       snapshot,
-      repoStatus,
+      repoStatus: repoStatus ?? null,
       openedRoom: null,
     };
   }

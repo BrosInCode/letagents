@@ -14,8 +14,10 @@
         <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
       </svg>
     </button>
-    <InkRoomLoader v-if="cardState === 'loading'" :label="roomLabel" />
-    <div v-else class="auth-access-card" :data-access-state="cardState" data-testid="auth-access-panel">
+    <!-- The first load shows the ink; any answer (a refusal, an error, a sign-in step) replaces it. -->
+    <Transition name="auth-stage" mode="out-in">
+    <InkRoomLoader v-if="shownState === 'loading' && inkLoader !== false" key="ink" :label="roomLabel" />
+    <div v-else-if="shownState !== 'loading'" key="card" class="auth-access-card" :data-access-state="shownState" data-testid="auth-access-panel">
       <p class="auth-room-line">
         <span class="auth-dot" aria-hidden="true"></span>
         <code>{{ roomLabel }}</code>
@@ -23,13 +25,8 @@
       </p>
 
       <Transition name="auth-state" mode="out-in">
-        <div :key="cardState" class="auth-state">
-          <template v-if="cardState === 'loading'">
-            <h1>Opening the room…</h1>
-            <div class="auth-skeleton" aria-hidden="true"><i></i><i></i><i></i></div>
-          </template>
-
-          <template v-else-if="cardState === 'connect'">
+        <div :key="shownState" class="auth-state">
+          <template v-if="shownState === 'connect'">
             <h1>Connect GitHub to open this room</h1>
             <p>Approve once in your browser. This app remembers access after that.</p>
             <div class="auth-actions">
@@ -52,7 +49,7 @@
             </div>
           </template>
 
-          <template v-else-if="cardState === 'code' && pendingAuth">
+          <template v-else-if="shownState === 'code' && pendingAuth">
             <div class="auth-code-block" data-testid="auth-pending-device-flow">
               <small>Check this code in your browser</small>
               <strong data-testid="auth-user-code">{{ pendingAuth.userCode }}</strong>
@@ -100,7 +97,7 @@
             </div>
           </template>
 
-          <template v-else-if="cardState === 'connected'">
+          <template v-else-if="shownState === 'connected'">
             <h1>GitHub connected</h1>
             <p>Open the room to load its messages, tasks, and agents.</p>
             <div class="auth-actions">
@@ -125,7 +122,7 @@
             </div>
           </template>
 
-          <template v-else-if="cardState === 'forbidden'">
+          <template v-else-if="shownState === 'forbidden'">
             <h1>{{ forbiddenTitle }}</h1>
             <p>This account doesn't have access to the repository behind it. Switch accounts, or ask a repo admin for access.</p>
             <span v-if="authStatus?.account" class="auth-account-chip" data-testid="auth-account">
@@ -158,7 +155,7 @@
           </template>
 
           <RoomJoinAccess
-            v-else-if="cardState === 'membership' || cardState === 'repo_collaborator'"
+            v-else-if="shownState === 'membership' || shownState === 'repo_collaborator'"
             :access="access"
             :account="authStatus?.account ?? null"
             :busy="busy"
@@ -167,7 +164,7 @@
             @sign-out="$emit('sign-out')"
           />
 
-          <template v-else-if="cardState === 'missing'">
+          <template v-else-if="shownState === 'missing'">
             <h1>Choose a room to begin</h1>
             <p>Pick a room from the sidebar, or create one to start working with agents.</p>
           </template>
@@ -177,7 +174,8 @@
             <p>
               <template v-if="githubUnavailable">LetAgents could not check your role on this repository, because GitHub did not answer.</template>
               <template v-else>LetAgents couldn't reach the room server.</template>
-              <template v-if="retrySecondsLeft !== null">
+              <template v-if="retrying">Retrying…</template>
+              <template v-else-if="retrySecondsLeft !== null">
                 <template v-if="retrySecondsLeft > 0">
                   It usually recovers on its own — retrying in
                   <b data-testid="auth-retry-countdown">{{ retrySecondsLeft }}</b>s.
@@ -202,6 +200,7 @@
 
       <p v-if="effectiveFeedback" class="auth-feedback" data-testid="auth-feedback">{{ effectiveFeedback }}</p>
     </div>
+    </Transition>
   </section>
 </template>
 
@@ -226,6 +225,7 @@ import {
   retryDeadlineAt,
   retrySecondsLeft as computeRetrySecondsLeft,
 } from "./auth-onboarding";
+import type { AuthCardState } from "./auth-onboarding";
 
 const props = defineProps<{
   access: DesktopRoomAccess;
@@ -233,6 +233,8 @@ const props = defineProps<{
   busy: boolean;
   feedback: string | null;
   snapshotPending?: boolean;
+  /** False while the first-load veil shows the ink over the whole window. */
+  inkLoader?: boolean;
   roomLabel?: string | null;
   sidebarMode: SidebarMode;
 }>();
@@ -263,8 +265,20 @@ const cardState = computed(() =>
   }),
 );
 
+// The last answer the room gave. A retry after it (automatic, or "Retry now")
+// reports "loading" again; the card stays and says it is retrying, instead of
+// the screen jumping back to the first-load ink and then to the card again.
+const settledState = ref<AuthCardState | null>(null);
+watch(cardState, (state) => { if (state !== "loading") settledState.value = state; }, { immediate: true });
+watch(() => props.access.roomIdentifier, () => {
+  settledState.value = cardState.value === "loading" ? null : cardState.value;
+});
+const shownState = computed<AuthCardState>(() =>
+  cardState.value === "loading" && settledState.value ? settledState.value : cardState.value);
+const retrying = computed(() => cardState.value === "loading" && shownState.value !== "loading");
+
 const roomLabel = computed(() => {
-  if (cardState.value === "missing") return "LetAgents";
+  if (shownState.value === "missing") return "LetAgents";
   // People recognize room names, not canonical identifiers. A membership
   // refusal names a room the app has never opened.
   const knownLabel = props.roomLabel && props.roomLabel !== props.access.roomIdentifier ? props.roomLabel : null;
@@ -273,7 +287,7 @@ const roomLabel = computed(() => {
 });
 
 const roomSuffix = computed(() => {
-  switch (cardState.value) {
+  switch (shownState.value) {
     case "loading":
       return "opening";
     case "connect":
