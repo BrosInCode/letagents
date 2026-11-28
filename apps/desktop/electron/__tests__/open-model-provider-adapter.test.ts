@@ -103,6 +103,7 @@ function createHarness() {
   const neverExits = new Promise<ProviderProcessExit>(() => {});
   observedProcessExit = neverExits;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    unsupportedSystem: () => null,
     resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);
@@ -473,6 +474,24 @@ test("Open Model preserves GitHub CLI config discovery while isolating OpenCode 
       if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
     }
   }
+});
+
+test("Open Model refuses to start OpenCode on a macOS older than its minimum, before it writes anything", async () => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-adapter-"));
+  try {
+    const adapter = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot,
+      dependencies: {
+        ...harness.dependencies,
+        unsupportedSystem: () => ({ message: "Open Model needs macOS 13 or later.", detail: "This Mac has macOS 12.7.4." }),
+      },
+    });
+    await assert.rejects(adapter.spawn(spawnRequest()), /^Error: Open Model needs macOS 13 or later\. This Mac has macOS 12\.7\.4\.$/);
+    assert.equal(harness.launches.length, 0);
+    assert.deepEqual(await readdir(runtimeRoot), []);
+  } finally { await rm(runtimeRoot, { recursive: true, force: true }); }
 });
 
 test("Open Model launches a dedicated OpenCode server without putting the provider key in config or MCP", async () => {
@@ -4638,6 +4657,7 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
   let nextPort = 43_821;
   const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
   const dependencies: OpenModelProviderAdapterDependencies = {
+    unsupportedSystem: () => null,
     resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);

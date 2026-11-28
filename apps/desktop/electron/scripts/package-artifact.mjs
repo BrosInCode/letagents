@@ -18,6 +18,7 @@ import {
 } from "./mcp-runtime-install.mjs";
 import { RENDERER_BUNDLED_PACKAGES } from "./packaged-dependencies.mjs";
 import { packagedBuildFilter, packagedPackageJson, packagedTestPaths } from "./packaged-imports.mjs";
+import { assertBundleMinimumMacOS } from "./macho-minimum-macos.mjs";
 import {
   assertDesktopArchitecture,
   assertWindowsArchitecture,
@@ -64,6 +65,8 @@ const desktopVersion = packageJson.version;
 const desktopArch = windows ? assertWindowsArchitecture(process.arch) : assertDesktopArchitecture(process.arch);
 const openCodeVersion = packageJson.letagentsRuntime?.openCodeVersion;
 const mcpVersion = packageJson.letagentsRuntime?.mcpVersion;
+// The oldest macOS the pinned OpenCode starts on; Open Model checks it at run time.
+const openCodeMinimumMacOS = packageJson.letagentsRuntime?.openCodeMinimumMacOS;
 const execFileAsync = promisify(execFile);
 const copyright = "Copyright © LetAgents";
 if (typeof desktopVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(desktopVersion)) {
@@ -74,6 +77,9 @@ if (typeof openCodeVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(openCodeVersi
 }
 if (typeof mcpVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(mcpVersion)) {
   throw new Error("package.json must declare letagentsRuntime.mcpVersion.");
+}
+if (typeof openCodeMinimumMacOS !== "string" || !/^\d+\.\d+$/.test(openCodeMinimumMacOS)) {
+  throw new Error("package.json must declare letagentsRuntime.openCodeMinimumMacOS as x.y.");
 }
 
 async function replacePlistString(plistPath, key, value) {
@@ -517,6 +523,20 @@ for (const entry of required) {
     path: entry.manifestPath,
     bytes: bytes.length,
     sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
+}
+// macOS installs and updates the app wherever LSMinimumSystemVersion allows,
+// so no file may need a newer macOS unless the feature it belongs to turns
+// itself off there. The app keeps Electron's minimum: raising it would leave
+// an auto-updated Mac on an older system with an app that does not start.
+if (!windows) {
+  const declaredMacOS = (await execFileAsync("plutil", ["-extract", "LSMinimumSystemVersion", "raw", join(contents, "Info.plist")])).stdout.trim();
+  await assertBundleMinimumMacOS({
+    bundle,
+    declared: declaredMacOS,
+    exceptions: [
+      { path: bundlePath(join(app, "runtime", bundledOpenCode)), feature: "Open Model", minimum: openCodeMinimumMacOS },
+    ],
   });
 }
 const packagedLocalStore = await import(pathToFileURL(join(

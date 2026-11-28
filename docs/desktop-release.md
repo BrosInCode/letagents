@@ -7,6 +7,12 @@ LetAgents desktop ships two macOS artifacts for both Apple Silicon (`arm64`) and
 
 Each release also ships an unsigned Windows x64 installer; see [Windows](#windows-unsigned-beta) below.
 
+## macOS minimum
+
+The app declares Electron's `LSMinimumSystemVersion` (macOS 12.0), and macOS installs and updates it on any Mac that meets that value. Do not raise it to suit one bundled file: an update that needs a newer macOS leaves an older Mac with an app that does not start. The bundled OpenCode binary needs macOS 13.0 (its Mach-O `LC_BUILD_VERSION` minos), so Open Model reports "Open Model needs macOS 13 or later" on an older Mac and does not start OpenCode. Other agents still work there.
+
+`apps/desktop/package.json#letagentsRuntime.openCodeMinimumMacOS` records that value for the app and for packaging. `package-artifact.mjs` reads the minos of every Mach-O file in the bundle and fails the build when a file needs a newer macOS than the app declares, unless the file is on its exceptions list with the feature that checks the version at run time. OpenCode is on that list, and the build also fails when its real minos is not the recorded value. When an OpenCode update changes its minos, update `openCodeMinimumMacOS` and the user docs (`src/web/src/components/docs/sections/`).
+
 Each versioned release also includes SHA-256 checksum files, `desktop-release-<arch>.json`, `latest-mac-<arch>.yml`, a ZIP blockmap, and the legacy `RELEASES-<arch>.json`. The workflow publishes the first two discovery formats to each architecture feed: `latest-mac.yml` powers the progress-aware updater, while `RELEASES.json` remains a compatibility bridge for clients released before 0.1.4. Both point to immutable, versioned files on Cloudflare R2, so stable clients never depend on GitHub's repository-wide `releases/latest` selection or private-repository authentication.
 
 ## One-time Apple setup
