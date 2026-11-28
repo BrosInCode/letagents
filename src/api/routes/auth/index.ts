@@ -18,6 +18,7 @@ import { db } from "../../db/client.js";
 import { system_github_app } from "../../db/schema.js";
 import { buildGitHubAppSetupRedirectPath } from "../../github/app-installation.js";
 import { isGitHubAppSetupState } from "../../github/app-setup-state.js";
+import { hasPlatformAdmins } from "../../github/platform-admins.js";
 import {
   clearGitHubRepoAccessCacheForLogin,
 } from "../../github/repo-access.js";
@@ -152,6 +153,12 @@ export function registerGitHubAppCallbackRoute(app: Express): void {
     if (code) {
       if (!stateValid || !isGitHubAppSetupState(state)) {
         res.status(401).send("<html><body><h2>Error: Invalid State</h2><p>Your session may have expired.</p></body></html>");
+        return;
+      }
+      // The setup state is only minted for a named server admin. Refuse here too, so a
+      // state minted before the server admin list was emptied cannot replace the app.
+      if (!hasPlatformAdmins()) {
+        res.status(403).send("<html><body><h2>Error: No server admins</h2><p>Set LETAGENTS_PLATFORM_ADMINS to set up the GitHub App.</p></body></html>");
         return;
       }
       // Handling Manifest Creation Callback

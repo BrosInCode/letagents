@@ -13,6 +13,7 @@ import {
   resolveGitHubAppRoomIntegrationStatus,
 } from "../../github/app-installation.js";
 import { createGitHubAppSetupState } from "../../github/app-setup-state.js";
+import { isPlatformAdminLogin } from "../../github/platform-admins.js";
 import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import { resolveRoomRequest, type RoomRequestResolver } from "../../rooms/request-room.js";
@@ -77,15 +78,13 @@ async function getGitHubRoomIntegrationProject(
   };
 }
 
+/**
+ * A named server admin, signed in as a person (a browser or app session). An
+ * owner token is refused: agents often hold one, and the setup replaces the
+ * server-wide GitHub App.
+ */
 function isPlatformAdmin(req: AuthenticatedRequest): boolean {
-  const platformAdminsStr = process.env.LETAGENTS_PLATFORM_ADMINS;
-  if (!platformAdminsStr) return true; // Fallback to room admin if no platform admins defined
-
-  const platformAdmins = platformAdminsStr.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
-  if (platformAdmins.length === 0) return true;
-
-  const userLogin = req.sessionAccount?.login?.toLowerCase();
-  return Boolean(userLogin && platformAdmins.includes(userLogin));
+  return req.authKind === "session" && isPlatformAdminLogin(req.sessionAccount?.login);
 }
 
 async function buildGitHubRoomIntegrationResponse(
@@ -125,7 +124,9 @@ export function registerGitHubIntegrationSetupRoute(
     }
 
     if (!isPlatformAdmin(req)) {
-      res.status(403).json({ error: "Platform admin privileges required to modify global configuration." });
+      res.status(403).json({
+        error: "Only a server admin, signed in to the LetAgents app, can set up the GitHub App. Server admins are the GitHub logins in LETAGENTS_PLATFORM_ADMINS.",
+      });
       return;
     }
 
