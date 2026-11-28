@@ -552,6 +552,41 @@ test("Open Model context-window and endpoint setup failures surface verbatim wit
   }));
   assert.equal(quarantined.failed, true);
   assert.equal(quarantined.failureDetail, missingContext);
+
+  const retainedPid = supervisedLaunchProgress(entry({
+    provider: "open-model",
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/open-model-wt",
+    providerPid: 4242,
+    executionGenerationId: "exec-2",
+    lastError: `convergence scheduler failure: ${missingContext}`,
+  }));
+  assert.equal(retainedPid.failed, true);
+  assert.equal(retainedPid.recoverableBlocked, false);
+  assert.equal(retainedPid.failureDetail, missingContext);
+
+  const cancelled = supervisedLaunchProgress(entry({
+    provider: "open-model",
+    desiredState: "stopped",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/open-model-wt",
+    lastError: `convergence scheduler failure: ${missingContext}`,
+  }));
+  assert.equal(cancelled.stopFailed, false);
+  assert.equal(cancelled.stopping, true);
+
+  const nonOpenModel = supervisedLaunchProgress(entry({
+    provider: "codex",
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/codex-wt",
+    executionGenerationId: "exec-3",
+    lastError: `convergence scheduler failure: ${missingContext}`,
+  }));
+  assert.equal(nonOpenModel.recoverableBlocked, true);
+  assert.match(nonOpenModel.failureDetail ?? "", /reconnect to the previous Codex process/i);
 });
 
 test("a stop the daemon could not apply stays a failed stop, with Retry, even with no provider", () => {

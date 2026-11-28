@@ -484,6 +484,26 @@ test("Open Model reads context_window_tokens / maximum_output_tokens and surface
     })),
     { context: 16_000, output: 2000 },
   );
+  // top_provider.context_length caps context_window_tokens and rejects <= 1.
+  assert.deepEqual(
+    await resolveOpenModelLimits(input, async () => Response.json({
+      data: [{ id: "glm-5.3", context_window_tokens: 1_048_576, top_provider: { context_length: 262_144 } }],
+    })),
+    { context: 262_144, output: 8192 },
+  );
+  await assert.rejects(
+    resolveOpenModelLimits(input, async () => Response.json({
+      data: [{ id: "glm-5.3", context_window_tokens: 262_144, top_provider: { context_length: 1 } }],
+    })),
+    /Set its context window/,
+  );
+  // Standard context_length / max_output_tokens take precedence over *_tokens aliases.
+  assert.deepEqual(
+    await resolveOpenModelLimits({ ...input, model: "both" }, async () => Response.json({
+      data: [{ id: "both", context_length: 64_000, context_window_tokens: 1_048_576, max_output_tokens: 4096, maximum_output_tokens: 2048 }],
+    })),
+    { context: 64_000, output: 4096 },
+  );
   for (const status of [401, 403]) {
     await assert.rejects(
       resolveOpenModelLimits(input, async () => new Response("Bearer xpl_secret invalid", { status })),

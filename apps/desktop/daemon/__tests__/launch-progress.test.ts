@@ -131,5 +131,14 @@ test("launch errors map to one recovery kind", () => {
   assert.equal(launchFailureAction(new Error("Provider launch did not attest the complete configuration snapshot.")), "retry");
   assert.equal(launchFailureAction(new Error("listen EADDRINUSE 127.0.0.1:4013 pid 401")), "retry", "a bare 401 is not a sign-in");
   assert.equal(launchFailureAction(new Error("request failed with status 403")), "sign_in");
+  assert.equal(
+    launchFailureAction(new Error("The model endpoint rejected authentication (HTTP 401) while checking this model's context window. Check your API key in Open Model settings, or set its context window and save it as the default model, then try again.")),
+    "retry",
+    "Open Model endpoint API-key rejections are not a CLI sign-in flow",
+  );
+  assert.equal(
+    launchFailureAction(new Error("The model endpoint rejected authentication (HTTP 403) while checking this model's context window.")),
+    "retry",
+  );
   assert.equal(launchFailureAction(null), "retry");
 });

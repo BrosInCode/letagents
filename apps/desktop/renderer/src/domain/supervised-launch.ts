@@ -137,9 +137,7 @@ function missingProviderRuntimeDetail(entry: LaunchFields, providerLabel: string
  * to friendly, retryable copy. */
 const INTERNAL_SCHEDULER_FAILURE = /^convergence scheduler failure:/i;
 function provisioningFailureDetail(lastError: string | null | undefined, fallback: string): string {
-  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) {
-    return startRefusalReason(lastError) ?? openModelLaunchFailureReason(lastError) ?? fallback;
-  }
+  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) return startRefusalReason(lastError) ?? fallback;
   return safeUserVisibleErrorDetail(lastError, fallback);
 }
 
@@ -205,7 +203,7 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     && !stopFailed;
   const stopped = entry.desiredState === "stopped" && entry.observedState === "stopped";
   const ready = entry.desiredState === "running" && reached >= 4;
-  const openModelFailure = openModelLaunchFailureReason(entry.lastError);
+  const openModelFailure = openModelLaunchFailureReason(entry.lastError, entry.provider);
   const recoverableBlocked = hasProviderExecution
     && !openModelFailure
     && !ready

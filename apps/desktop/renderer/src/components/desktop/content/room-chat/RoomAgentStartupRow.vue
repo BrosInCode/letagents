@@ -242,7 +242,14 @@ function run(action: () => void): void {
   color: transparent;
   animation: room-agent-startup-sheen 1.6s linear infinite;
 }
-.room-agent-startup[data-state="failed"] .room-agent-startup-text { color: var(--red-text); }
+.room-agent-startup[data-state="failed"] .room-agent-startup-line { align-items: flex-start; }
+.room-agent-startup[data-state="failed"] .room-agent-startup-text {
+  color: var(--red-text);
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.room-agent-startup[data-state="failed"] .room-agent-startup-chevron { margin-top: 3px; }
 .room-agent-startup-chevron { flex: 0 0 auto; color: var(--text-tertiary); transition: transform 180ms var(--ease-out); }
 .room-agent-startup-line[aria-expanded="true"] .room-agent-startup-chevron { transform: rotate(90deg); }
 

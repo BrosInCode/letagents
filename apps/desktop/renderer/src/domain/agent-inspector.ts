@@ -451,7 +451,7 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
     return `Agent startup needs attention. Review the startup error.${nextStep}`;
   }
   // A refused start leads with what the launch said, not with the scheduler's prefix.
-  const refusal = startRefusalReason(detail) ?? openModelLaunchFailureReason(detail);
+  const refusal = startRefusalReason(detail) ?? openModelLaunchFailureReason(detail, entry.provider);
   if (refusal) return refusal;
   if (/saved OpenCode process is no longer running|previous provider runtime is unavailable/i.test(detail)) {
     return "The provider process stopped. Recover the agent to continue with the same identity and workspace.";

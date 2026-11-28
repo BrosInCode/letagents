@@ -39,8 +39,9 @@ export async function resolveOpenModelLimits(
       if (effectiveContext && effectiveContext > 1) return limits(effectiveContext,
         positiveInteger(top?.max_completion_tokens) ?? positiveInteger(model?.max_output_tokens)
           ?? positiveInteger(model?.maximum_output_tokens) ?? SUPERVISED_OPEN_MODEL_OUTPUT_TOKEN_LIMIT);
-    } else if (response.status === 401 || response.status === 403) {
-      authStatus = response.status;
+    } else {
+      if (response.status === 401 || response.status === 403) authStatus = response.status;
+      void response.body?.cancel().catch(() => undefined);
     }
   } catch {
     // Endpoint errors can contain credentials. Keep the setup error actionable and local.
