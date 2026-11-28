@@ -1,5 +1,5 @@
 <template>
-  <div id="letagents-app" :class="{ 'landing-theme': isLanding }" :data-route="String(route.name ?? '')">
+  <div id="letagents-app" :class="{ 'landing-theme': inkChrome }" :data-route="String(route.name ?? '')">
     <Navbar v-if="showNavbar" />
     <main>
       <RouterView />
@@ -18,8 +18,9 @@ import ToastContainer from '@/components/ui/ToastContainer.vue'
 import './styles/landing.css'
 
 const route = useRoute()
-// The landing page and the room form (/new) share the dark ink look.
+// The landing page and the room form (/new) share the dark ink look; the docs wear it too.
 const isLanding = computed(() => route.name === 'landing' || route.name === 'new-room')
+const inkChrome = computed(() => isLanding.value || route.name === 'docs')
 // Show navbar/footer on landing and docs, hide in room view.
 // The landing page is one full screen, so it has the navigation bar but no footer.
 const showNavbar = computed(() => !['room', 'messages', 'my-work', 'connectors', 'ask', 'inbox'].includes(String(route.name)))

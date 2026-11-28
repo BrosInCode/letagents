@@ -141,7 +141,7 @@ test('the docs check the session first, so a signed-in reader keeps the account 
   assert.equal(requests.length, 1)
 })
 
-test('Venom styling is confined to the landing route, which has no theme toggle or footer', async () => {
+test('the ink look covers the landing page and the docs; only the landing page drops the footer', async () => {
   const router = createRouter({ history: createMemoryHistory(), routes: [
     { path: '/', name: 'landing', component: { render: () => h('p', 'Landing') } },
     { path: '/docs', name: 'docs', component: { render: () => h('p', 'Documentation') } },
@@ -157,7 +157,9 @@ test('Venom styling is confined to the landing route, which has no theme toggle 
   assert.match(landing, /class="landing-theme"/)
   assert.doesNotMatch(landing, /nav-theme-toggle|class="footer"/)
   const docs = await render('/docs')
-  assert.doesNotMatch(docs, /class="landing-theme"|nav-theme-toggle/)
+  assert.match(docs, /class="landing-theme"/)
+  assert.doesNotMatch(docs, /nav-theme-toggle/)
+  assert.match(docs, /class="footer"/)
   assert.match(docs, /Documentation/)
   const room = await render('/in/test')
   assert.doesNotMatch(room, /landing-theme|nav-theme-toggle|aria-label="Main navigation"/)

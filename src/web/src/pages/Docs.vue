@@ -1,5 +1,6 @@
 <template>
   <div class="docs-page" @keydown="handlePageKeydown">
+    <InkGrain class="docs-grain" />
     <div v-if="sidebarOpen" class="sidebar-overlay" @click="closeSidebar" />
 
     <div class="docs-layout">
@@ -38,6 +39,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import DocsSidebar from '@/components/docs/DocsSidebar.vue'
+import InkGrain from '@/components/landing/InkGrain.vue'
 import MenuIcon from '@/components/icons/MenuIcon.vue'
 import AgentsDocs from '@/components/docs/sections/AgentsDocs.vue'
 import GettingStartedDocs from '@/components/docs/sections/GettingStartedDocs.vue'
