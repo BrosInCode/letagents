@@ -14,7 +14,8 @@
         <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
       </svg>
     </button>
-    <div class="auth-access-card" :data-access-state="cardState" data-testid="auth-access-panel">
+    <InkRoomLoader v-if="cardState === 'loading'" :label="roomLabel" />
+    <div v-else class="auth-access-card" :data-access-state="cardState" data-testid="auth-access-panel">
       <p class="auth-room-line">
         <span class="auth-dot" aria-hidden="true"></span>
         <code>{{ roomLabel }}</code>
@@ -206,6 +207,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import InkRoomLoader from "./InkRoomLoader.vue";
 import type {
   DesktopAuthStatus,
   DesktopPendingDeviceAuth,

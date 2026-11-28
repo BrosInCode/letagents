@@ -14,6 +14,11 @@ export interface UseInkSceneOptions {
   placeMark?: () => InkMarkPlacement | null;
   /** Smaller grids: phones, small windows, coarse pointers. Defaults to a media query. */
   light?: () => boolean;
+  /**
+   * Start from the formed mark instead of playing the opening: it is simulated hidden, a
+   * slice at a time, and fades in once formed. For screens seen often, such as a loader.
+   */
+  formed?: boolean;
 }
 
 /**
@@ -140,8 +145,8 @@ export function useInkScene(options: UseInkSceneOptions) {
     canvas.addEventListener("webglcontextlost", onContextLost, { once: true });
     observer = new ResizeObserver(onResize);
     observer.observe(canvas);
-    startedAt = 0;
-    veiled.value = reduced;
+    startedAt = options.formed ? performance.now() - scene.end * 1000 : 0;
+    veiled.value = reduced || Boolean(options.formed);
     runOpening();
   }
 
