@@ -695,6 +695,8 @@ test("agy's error steps read back as the owner's reason, from a copy of the conv
   assert.match(antigravityStepErrorMessage("Error 429, Message: Resource has been exhausted, Status: RESOURCE_EXHAUSTED quotaResetTimeStamp\":\"2026-11-24T08:00:00Z"),
     /^You may have run out of Antigravity usage for this model\. Antigravity answered with a usage limit error; the limit resets at 2026-11-24T08:00:00\.000Z\. The turn ended/);
   assert.match(antigravityStepErrorMessage("NOT_FOUND (code 404): model gemini-x is not available"), /request failed \(NOT_FOUND 404\): model gemini-x is not available/);
+  assert.equal(antigravityStepErrorMessage("RESOURCE_EXHAUSTED quotaResetTimeStamp\":\"2026-99-99T00:00:00Z"),
+    "You may have run out of Antigravity usage for this model. Antigravity answered with a usage limit error. The turn ended without a reply.", "a time that is no date is left out");
   const { DatabaseSync } = await import("node:sqlite");
   const folder = mkdtempSync(join(tmpdir(), "letagents-agy-db-"));
   roots.push(folder);

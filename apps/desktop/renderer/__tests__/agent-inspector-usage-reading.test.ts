@@ -34,9 +34,14 @@ test("limits that are read on open say when they were read, not that an update i
   assert.doesNotMatch(onOpen, /waiting for an update/);
   // A provider that keeps reading its limits still says an update is late.
   assert.match(await render({ usage: usage(tenMinutesAgo) }), /Last reported limits · waiting for an update/);
-  // So does a reading the adapter itself marks stale, or one the Inspector could not refresh.
-  assert.match(await render({ usage: usage(tenMinutesAgo, "stale"), readOnOpen: true }), /waiting for an update/);
+  // A read that failed keeps the last reading: only another open reads again.
+  assert.match(await render({ usage: usage(tenMinutesAgo, "stale"), readOnOpen: true }), /Limits as of [^<]+ · open the Overview again/);
+  // An Inspector that could not refresh at all still says so.
   assert.match(await render({ usage: usage(tenMinutesAgo), readOnOpen: true, stale: true }), /waiting for an update/);
+  // A reading from another day names its day.
+  const yesterday = new Date(Date.now() - 26 * 60 * 60_000);
+  const day = new Intl.DateTimeFormat(undefined, { weekday: "short" }).format(yesterday);
+  assert.match(await render({ usage: usage(yesterday.toISOString()), readOnOpen: true }), new RegExp(`Limits as of ${day}`));
   // A fresh reading shows no note.
   assert.doesNotMatch(await render({ usage: usage(new Date().toISOString()), readOnOpen: true }), /Limits as of|waiting for an update/);
 });

@@ -31,9 +31,10 @@ export function isAntigravityUsageLimitText(text: string): boolean {
  */
 export function antigravityStepErrorMessage(text: string): string {
   const quota = isAntigravityUsageLimitText(text);
-  const reset = /quotaResetTimeStamp\W+(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/.exec(text)?.[1] ?? null;
+  // A time of the right shape can still be no date (month 99): it is then left out, never thrown.
+  const resetMs = Date.parse(/quotaResetTimeStamp\W+(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/.exec(text)?.[1] ?? "");
   if (quota) {
-    return `You may have run out of Antigravity usage for this model. Antigravity answered with a usage limit error${reset ? `; the limit resets at ${new Date(reset).toISOString()}` : ""}. The turn ended without a reply.`;
+    return `You may have run out of Antigravity usage for this model. Antigravity answered with a usage limit error${Number.isFinite(resetMs) ? `; the limit resets at ${new Date(resetMs).toISOString()}` : ""}. The turn ended without a reply.`;
   }
   const status = /\bError (\d{3})\b[^]*?Status:\s*([A-Z_]+)/.exec(text) ?? /\b([A-Z_]{4,}) \(code (\d{3})\)/.exec(text);
   const message = /Message:\s*([^,]{1,240})/.exec(text)?.[1]?.trim()

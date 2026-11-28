@@ -49,10 +49,13 @@ const isCompacting = computed(() => !props.stale && (props.compacting || props.u
 const accountAged = computed(() => windows.value.some(window => Date.now() - Date.parse(window.observedAt) > 90_000));
 const accountResetPassed = computed(() => windows.value.some(window => window.resetsAt && Date.parse(window.resetsAt) <= Date.now()));
 const accountStale = computed(() => props.stale || props.usage?.account.state === 'stale' || accountAged.value || accountResetPassed.value);
-// An old reading that is only old is expected when limits are read on open: no update is on its way.
-const accountStaleLabel = computed(() => props.readOnOpen && accountAged.value && !accountResetPassed.value && !props.stale && props.usage?.account.state !== 'stale'
-  ? `Limits as of ${formatDate('hourMinute', new Date(Math.min(...windows.value.map(window => Date.parse(window.observedAt)))))} · open the Overview again to update them`
-  : 'Last reported limits · waiting for an update');
+// Limits read on open get no update while the Overview stays open, whatever made the reading old: only another open reads them.
+const accountStaleLabel = computed(() => {
+  if (!props.readOnOpen || props.stale) return 'Last reported limits · waiting for an update';
+  const readAt = new Date(Math.min(...windows.value.map(window => Date.parse(window.observedAt))));
+  const today = readAt.toDateString() === new Date().toDateString();
+  return `Limits as of ${formatDate(today ? 'hourMinute' : 'weekdayHourMinute', readAt)} · open the Overview again to update them`;
+});
 const contextPercent = computed(() => {
   const context = props.usage?.context;
   return context?.capacityTokens ? Math.min(100, Math.round(context.usedTokens / context.capacityTokens * 100)) : null;
