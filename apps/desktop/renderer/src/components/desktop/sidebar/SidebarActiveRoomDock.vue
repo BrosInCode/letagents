@@ -2,7 +2,6 @@
   <Transition name="sidebar-active-dock">
     <button
       v-if="edge"
-      :key="edge"
       class="sidebar-active-dock"
       type="button"
       :data-edge="edge"
@@ -28,6 +27,8 @@
   </Transition>
 </template>
 
+<!-- One button for both edges (no key per edge): a jump scroll that flips
+     the edge must not replace the button and drop keyboard focus. -->
 <script setup lang="ts">
 import { ArrowDown, ArrowUp, ChevronRight, FolderOpen, GitBranch, MessageSquare } from "@lucide/vue";
 import type { SidebarDockEdge } from "../../../domain/sidebar-active-dock";
