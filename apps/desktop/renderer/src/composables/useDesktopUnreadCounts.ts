@@ -77,6 +77,8 @@ export function useDesktopUnreadCounts(options: {
   const snapshots = ref<Record<string, RoomUnreadSnapshot>>({});
   /** The server's answer, by room key; null until read, or when the server has no such route. */
   const server = ref<Record<string, DesktopServerRoomUnread> | null>(null);
+  /** False from a reset until the server has answered, or failed to, once: cloud rooms show no local count meanwhile. */
+  const serverSettled = ref(false);
   /** The highest message number this device reported per room, so a report is sent once. */
   const reported = new Map<string, number>();
   /** This device's reports: each comes back at most once as a `room_read` frame naming the same room and message. */
@@ -139,6 +141,11 @@ export function useDesktopUnreadCounts(options: {
           ? (saved === room.latestMessageId ? 0 : snapshot.count) : null;
         counts[key] = seen !== null && latest !== null && seen >= latest ? 0
           : fromHere === null ? fromServer : Math.min(fromServer, fromHere);
+        continue;
+      }
+      // A cloud room waits for the server's first answer instead of flashing a local count.
+      if (historyMode(room.roomIdentifier) === "cloud" && !serverSettled.value && desktopIpc.room?.getAccountUnread) {
+        counts[key] = 0;
         continue;
       }
       const snapshot = snapshots.value[key];
@@ -208,9 +215,14 @@ export function useDesktopUnreadCounts(options: {
       const answer = await read();
       if (!isCurrent()) return;
       if (!answer) { server.value = null; return; }
+      const previous = server.value;
       server.value = Object.fromEntries(answer.rooms.flatMap((room) => {
         const key = roomReadKey(room.roomId);
-        return key ? [[key, room]] : [];
+        if (!key) return [];
+        // No count right now (the access check could not say yes): keep the last server entry, not a local count.
+        const before = previous?.[key];
+        const keep = room.unreadCount === null && before?.readMessageId && before.unreadCount !== null;
+        return [[key, keep ? before : room]];
       }));
     }
     const sends = pendingReports(isCurrent, accountId);
@@ -237,6 +249,7 @@ export function useDesktopUnreadCounts(options: {
             // Keep the last answer; the next change asks again.
             serverDirty = true;
           }
+          if (isCurrent()) serverSettled.value = true;
         }
         if (!loadPage || !isCurrent()) continue;
         const rooms = [...new Map(options.rooms.value.map((room) => [roomReadKey(room.roomIdentifier), room])).values()]
@@ -293,6 +306,7 @@ export function useDesktopUnreadCounts(options: {
     revision += 1;
     snapshots.value = {};
     server.value = null;
+    serverSettled.value = false;
     reported.clear();
     ownReports.length = 0;
   }, { flush: "sync" });

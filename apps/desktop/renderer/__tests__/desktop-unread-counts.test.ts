@@ -285,7 +285,8 @@ test("a server without account unread keeps counting every room from history", a
     account: ref(accountA), rooms: ref([room("room-a", 3)]), readMarkers: ref({ "room-a": "msg_1" }), storageMode: ref("cloud"),
   }))!;
   try {
-    await counts.refresh(); await nextTick();
+    // The first server answer (here: no such route) is what releases the local count.
+    await settleDebounce(); await nextTick();
     assert.equal(counts.totalCount.value, 2);
     assert.deepEqual(historyReads, ["room-a"]);
   } finally { scope.stop(); globalThis.window = originalWindow; }
@@ -526,5 +527,78 @@ test("a sidebar that reorders or gains a cloud room keeps every count", async ()
     assert.deepEqual(seen, [], "no count changed while the rooms swapped places");
     assert.equal(counts.totalCount.value, 4);
     assert.equal(loads, loadsBefore, "no room was counted again");
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a server answer with no count keeps the last server count and never falls back to a local count with [status] posts", async () => {
+  const originalWindow = globalThis.window;
+  let allowed = true;
+  const status = (id: number) => ({ id: `msg_${id}`, sender: "Agent", source: "agent", text: "[status] working on task_9" }) as DesktopRoomMessage;
+  globalThis.window = { letagentsDesktop: { room: {
+    // Every message after the old marker is a hidden [status] post.
+    getMessagesAfter: async (_id: string, after: string | null) => {
+      const from = Number(after!.slice(4)) + 1;
+      return { messages: [status(from), status(from + 1), status(from + 2)], hasMore: false };
+    },
+    getAccountUnread: async () => ({ rooms: [allowed
+      ? { roomId: "room-g", readMessageId: "msg_10", unreadCount: 1, githubUnreadCount: 0 }
+      : { roomId: "room-g", readMessageId: null, unreadCount: null, githubUnreadCount: null }] }),
+    reportRoomRead: async () => {},
+  }, notifications: { setBadgeCount: async () => {} } } } as never;
+  const scope = effectScope();
+  const readRevision = ref(0);
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms: ref([room("room-g", 12)]), readMarkers: ref({ "room-g": "msg_4" }), storageMode: ref("cloud"),
+    readRevision: () => readRevision.value, takeReads: () => [null],
+  }))!;
+  try {
+    await settleDebounce();
+    assert.equal(counts.roomCounts.value["room-g"], 1);
+    allowed = false; readRevision.value += 1; await nextTick(); await settleDebounce();
+    assert.equal(counts.roomCounts.value["room-g"], 1, "the count stays the server's, not a local recount");
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a local count skips agent [status] posts, as the server does", async () => {
+  const originalWindow = globalThis.window;
+  globalThis.window = { letagentsDesktop: {
+    room: { getMessagesAfter: async () => ({ messages: [
+      { id: "msg_2", sender: "Agent", source: "agent", text: "[status] working" },
+      { id: "msg_3", sender: "Agent", source: "agent", text: "Done" },
+    ] as DesktopRoomMessage[], hasMore: false }) },
+    notifications: { setBadgeCount: async () => {} },
+  } } as never;
+  const scope = effectScope();
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms: ref([room("room-a", 3)]), readMarkers: ref({ "room-a": "msg_1" }), storageMode: ref("cloud"),
+  }))!;
+  try {
+    await counts.refresh(); await nextTick();
+    assert.equal(counts.totalCount.value, 1);
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("after sign-in a cloud room shows no local count before the server answers", async () => {
+  const originalWindow = globalThis.window;
+  globalThis.window = { letagentsDesktop: { room: {
+    getMessagesAfter: async () => ({ messages: [message(4), message(5), message(6)], hasMore: false }),
+    // Read on another device to the end: nothing is unread.
+    getAccountUnread: async () => ({ rooms: [{ roomId: "room-x", readMessageId: "msg_6", unreadCount: 0, githubUnreadCount: 0 }] }),
+    reportRoomRead: async () => {},
+  }, notifications: { setBadgeCount: async () => {} } } } as never;
+  const scope = effectScope();
+  const account = ref<DesktopAuthAccount | null>(null);
+  const seen: number[] = [];
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account, rooms: ref([room("room-x", 6)]), readMarkers: ref({ "room-x": "msg_3" }), storageMode: ref("cloud"),
+  }))!;
+  scope.run(() => watchTotals(counts.totalCount, seen));
+  try {
+    account.value = accountA; await nextTick();
+    await counts.refresh(); await nextTick();
+    assert.equal(counts.totalCount.value, 0, "no local count while the server has not answered");
+    await settleDebounce();
+    assert.equal(counts.totalCount.value, 0);
+    assert.deepEqual(seen.filter((count) => count > 0), [], "the badge never showed a local count");
   } finally { scope.stop(); globalThis.window = originalWindow; }
 });
