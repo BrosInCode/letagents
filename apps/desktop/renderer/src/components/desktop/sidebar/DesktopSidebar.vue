@@ -6,6 +6,9 @@
     :data-selection-active="selectionActive"
     data-testid="desktop-sidebar"
     @keydown.esc="handleSidebarEscape"
+    @wheel.passive="endStartupReveal"
+    @pointerdown="endStartupReveal"
+    @keydown="endStartupReveal"
     @dragover="clearSidebarDropTarget"
     @drop.prevent="cancelSidebarDrag"
   >
@@ -54,7 +57,7 @@
         </button>
       </div>
 
-      <div class="sidebar-room-sections">
+      <div class="sidebar-room-sections" ref="roomSectionsElement" :data-dock-edge="activeRoomDock.edge.value ?? undefined">
       <section v-if="pinnedProjectEntries.length" class="sidebar-pinned-section" data-testid="sidebar-section-pinned">
         <button
           class="sidebar-section-header pinned-section-header"
@@ -94,6 +97,7 @@
                 class="pinned-room"
                 :aria-current="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id ? 'page' : undefined"
                 :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
+                :data-holds-active="activeProject?.id === project.id"
                 :data-unread="project.parent.hasUnread"
                 :data-selected="isEntrySelected(project.parent)"
                 :data-sidebar-entry-id="project.parent.id"
@@ -121,7 +125,7 @@
                   <Check v-if="isEntrySelected(project.parent)" />
                 </span>
                 <span v-else class="pin-mark" aria-hidden="true">
-                  <Folder />
+                  <FolderOpen v-if="activeProject?.id === project.id" /><Folder v-else />
                 </span>
                 <span class="pinned-main">
                   <span class="room-title-line">
@@ -263,6 +267,7 @@
                 class="project-row"
                 :aria-current="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id ? 'page' : undefined"
                 :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
+                :data-holds-active="activeProject?.id === project.id"
                 :data-unread="project.parent.hasUnread"
                 :data-selected="isEntrySelected(project.parent)"
                 :data-sidebar-entry-id="project.parent.id"
@@ -291,7 +296,7 @@
                     <Check v-if="isEntrySelected(project.parent)" />
                   </span>
                   <span v-else class="project-icon" aria-hidden="true">
-                    <Folder />
+                    <FolderOpen v-if="activeProject?.id === project.id" /><Folder v-else />
                   </span>
                   <span class="project-copy">
                     <span class="room-title-line">
@@ -371,6 +376,14 @@
           Browse all rooms <ChevronRight aria-hidden="true" />
         </button>
       </div>
+      <SidebarActiveRoomDock
+        :edge="activeRoomDock.edge.value"
+        :top="activeRoomDock.listTop.value"
+        :title="activeRoomDockTitle.title"
+        :parent-title="activeRoomDockTitle.parentTitle"
+        :kind="activeRoomDockTitle.kind"
+        @reveal="activeRoomDock.reveal"
+      />
     </div>
 
     <div v-if="selectionActive" class="sidebar-footer sidebar-selection-footer">
@@ -537,6 +550,7 @@ import {
   Archive,
   Focus,
   Folder,
+  FolderOpen,
   GitBranch,
   PanelLeftClose,
   Check,
@@ -611,7 +625,10 @@ import {
 import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
-import { describeSidebarUnreadTotal, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarUnreadTotal, type SidebarUnreadTotal } from "../../../domain/sidebar-room-display";
+import SidebarActiveRoomDock from "./SidebarActiveRoomDock.vue";
+import { useSidebarActiveRoomDock } from "../../../composables/useSidebarActiveRoomDock";
+import { sidebarRowFullyVisible } from "../../../domain/sidebar-active-dock";
+import { describeSidebarUnreadTotal, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarRoomTitle, sidebarUnreadTotal, type SidebarUnreadTotal } from "../../../domain/sidebar-room-display";
 import CompanyScopeMenu from "./CompanyScopeMenu.vue";
 import type { DesktopOrganizationGitHubPage } from "../../../../../electron/ipc-types/organizations.js";
 import type { FirstRunCompanyStepState } from "../setup/types";
@@ -807,6 +824,8 @@ const reorderModifierLabel = isMacPlatform() ? "Option" : "Alt";
 const roomContextMenu = ref<RoomContextMenu | null>(null);
 const backgroundContextMenu = ref<{ x: number; y: number } | null>(null);
 const sidebarElement = ref<HTMLElement | null>(null);
+/** The scrolled list of pinned rooms and rooms. */
+const roomSectionsElement = ref<HTMLElement | null>(null);
 const zenMode = ref(false);
 const zenProjectId = ref<string | null>(null);
 const zenCollapsedProjects = ref<Record<string, boolean>>({});
@@ -1631,10 +1650,28 @@ async function revealActiveEntry(): Promise<void> {
     if (!row) return;
   }
   pendingActiveReveal = null;
-  row.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+  revealRow(row);
+}
+/** A row already fully on screen stays put; a hidden one comes to the middle of the list. */
+function revealRow(row: HTMLElement): void {
+  const list = roomSectionsElement.value;
+  if (list && sidebarRowFullyVisible(row.getBoundingClientRect(), list.getBoundingClientRect())) return;
+  row.scrollIntoView({ block: list ? "center" : "nearest", inline: "nearest", behavior: "instant" });
 }
 watch(() => props.activeEntry.id, (entryId) => requestActiveEntryReveal(entryId), { flush: "post" });
-watch(() => props.projectEntries, () => { if (pendingActiveReveal) void revealActiveEntry(); }, { flush: "post" });
+watch(() => props.projectEntries, () => {
+  if (pendingActiveReveal) void revealActiveEntry();
+  else if (Date.now() < startupRevealUntil) requestActiveEntryReveal(props.activeEntry.id);
+}, { flush: "post" });
+// At start the room list arrives in steps (the open room first, the rest
+// later), so the first reveal can find the open room on screen and then lose
+// it under the rooms that arrive after it. Until the person touches the
+// sidebar, each new list brings the open room back into view; a row already
+// on screen stays put.
+let startupRevealUntil = Date.now() + 15_000;
+function endStartupReveal(): void {
+  startupRevealUntil = 0;
+}
 
 // New room navigation reveals the promoted project.
 watch(() => props.revealRequest, async (request, _previous, onCleanup) => {
@@ -1649,7 +1686,40 @@ watch(() => props.revealRequest, async (request, _previous, onCleanup) => {
   if (cancelled || props.activeEntry.id !== request.entryId) return;
   const row = Array.from(sidebarElement.value?.querySelectorAll<HTMLElement>("[data-sidebar-entry-id]") || [])
     .find((element) => element.dataset.sidebarEntryId === request.entryId);
-  row?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+  if (row) revealRow(row);
 }, { flush: "post" });
+
+// "You are here" dock: while the open room's row is scrolled out of the list,
+// a copy of it waits at the edge it left by. A child room hidden in a
+// collapsed group is stood in for by its project's row.
+const activeRoomDock = useSidebarActiveRoomDock({
+  list: roomSectionsElement,
+  activeRow: () => {
+    if (props.activeEntry.type !== "room") return null;
+    // A row inside a closing group or section is about to go: its project's
+    // row stands in, unless that row is closing too.
+    const row = sidebarRow(props.activeEntry.id);
+    if (row && !isClosingSidebarRow(row)) return row;
+    const projectRow = activeProject.value ? sidebarRow(activeProject.value.parent.id) : null;
+    return projectRow && !isClosingSidebarRow(projectRow) ? projectRow : null;
+  },
+  // A drag scrolls the list near its edges, where the dock would sit.
+  enabled: () => props.activeEntry.type === "room" && !props.selectionActive && !dragState.value,
+  sources: [
+    () => props.activeEntry.id, () => props.projectEntries, () => props.pinnedCollapsed, () => props.roomsCollapsed,
+    () => props.collapsedProjects, () => props.selectionActive, zenMode, expandedProjectRoomLists,
+    () => Boolean(activeProject.value && projectIsCollapsed(activeProject.value.id)), () => Boolean(dragState.value),
+  ],
+});
+function isClosingSidebarRow(row: HTMLElement): boolean {
+  return Boolean(row.closest(".sidebar-reveal-leave-active, .sidebar-pinned-reveal-leave-active"));
+}
+const activeRoomDockTitle = computed<{ title: string; parentTitle: string | null; kind: RoomEntry["kind"] }>(() => {
+  const entry = props.activeEntry;
+  if (entry.type !== "room") return { title: "", parentTitle: null, kind: "parent" };
+  const project = activeProject.value;
+  if (!project || project.parent.id === entry.id) return { title: project?.roomName ?? entry.title, parentTitle: null, kind: "parent" };
+  return { title: sidebarRoomTitle(entry), parentTitle: project.roomName, kind: entry.kind };
+});
 
 </script>
