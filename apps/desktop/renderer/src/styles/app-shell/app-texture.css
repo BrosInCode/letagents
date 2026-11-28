@@ -32,16 +32,15 @@ html:has(.desktop-shell[data-app-texture]) body {
 }
 
 /*
- * A room theme sets its canvas and sidebar on the shell's inline style; set
- * them on the shell's children instead, so this wins there. The theme keeps
- * its accent, bubbles, composer and borders.
+ * The large panels are see-through, so the shell's background (and its grain)
+ * shows. This includes the room theme's chat canvas and sidebar: only those two
+ * panels go clear here. The theme's --workspace-canvas and --workspace-sidebar
+ * colours stay as they are, because smaller solid surfaces use them too (the
+ * quick-tour card, the empty-room welcome, the theme picker's preview).
  */
-.desktop-shell[data-app-texture] > * {
-  --workspace-canvas: transparent;
-  --workspace-sidebar: transparent;
-}
-
 .desktop-shell[data-app-texture] :is(
+  .room-chat-main,
+  .app-sidebar,
   .app-main,
   .desktop-room-shell,
   .desktop-room-header,
