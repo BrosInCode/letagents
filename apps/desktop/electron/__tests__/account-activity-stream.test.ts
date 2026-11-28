@@ -238,3 +238,25 @@ test("stopping clears the state and ends the connection", async () => {
   stream.stopAccountActivityStream();
   assert.deepEqual(stream.getAccountActivityState(), { connected: false, rooms: {} });
 });
+
+test("a restart keeps the published rooms until the new snapshot; a stop clears them", async () => {
+  let send!: (event: string, data: unknown) => void;
+  responders.push((res) => { send = sse(res); });
+  stream.restartAccountActivityStream();
+  await until(() => Boolean(send), "the stream to open");
+  send("snapshot", { rooms: [{ room_id: "room-k", latest_message_id: "msg_9", latest_message_at: null, working: [] }] });
+  await until(() => stream.getAccountActivityState().rooms["room-k"]?.latestMessageId === "msg_9", "the snapshot");
+
+  let sendNext!: (event: string, data: unknown) => void;
+  responders.push((res) => { sendNext = sse(res); });
+  const before = published.length;
+  stream.restartAccountActivityStream();
+  assert.equal(stream.getAccountActivityState().rooms["room-k"]?.latestMessageId, "msg_9", "the restart does not wipe the rooms");
+  assert.ok(published.slice(before).every((entry) => Object.keys(entry.payload.rooms).length > 0), "no empty rooms were published");
+  await until(() => Boolean(sendNext), "the new stream to open");
+  sendNext("snapshot", { rooms: [{ room_id: "room-k", latest_message_id: "msg_11", latest_message_at: null, working: [] }] });
+  await until(() => stream.getAccountActivityState().rooms["room-k"]?.latestMessageId === "msg_11", "the new snapshot");
+
+  stream.stopAccountActivityStream();
+  assert.deepEqual(stream.getAccountActivityState(), { connected: false, rooms: {} });
+});

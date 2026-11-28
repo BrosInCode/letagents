@@ -212,9 +212,11 @@ export async function countUnreadRoomMessages(input: {
       nextNumber = Math.max(nextNumber, number);
       const ownMessage = message.source === "browser" && ownNames.has(message.sender.trim().toLowerCase());
       const promptOnly = message.agentPromptKind === "auto" && !message.text.trim();
+      // The server never counts an agent's [status] post (account-unread/unread.ts).
+      const agentStatus = message.source === "agent" && /^\[status\]/i.test(message.text || "");
       const hiddenGitHubEvent = isLowSignalGitHubCheckMessage(message)
         || (!githubEventsVisible && isGitHubRoomMessage(message));
-      if (!ownMessage && !promptOnly && !hiddenGitHubEvent) result.count += 1;
+      if (!ownMessage && !promptOnly && !agentStatus && !hiddenGitHubEvent) result.count += 1;
     }
     if (!page.hasMore || page.messages.some((message) => messageNumber(message.id) >= latestNumber)) break;
     if (nextNumber <= cursorNumber) throw new Error("Unread message history did not advance.");
