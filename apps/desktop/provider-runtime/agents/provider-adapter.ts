@@ -627,7 +627,7 @@ export interface ProviderRoomTurnOptions {
 }
 
 export interface ProviderAdapter {
-  readUsage?(handle: ProviderHandle): Promise<import("../../shared/provider-usage.js").ProviderUsage | null>;
+  readUsage?(handle: ProviderHandle, options?: import("../../shared/provider-usage.js").ProviderUsageReadOptions): Promise<import("../../shared/provider-usage.js").ProviderUsage | null>;
   /**
    * Stop a command that the agent runs in the background, at its owner's
    * request. "stopping": the provider accepted it, and the command's own end

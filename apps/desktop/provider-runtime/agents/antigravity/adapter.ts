@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { ClaudePermissionObservation, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
-import type { ProviderUsage } from "../../../shared/provider-usage.js";
+import type { ProviderUsage, ProviderUsageReadOptions } from "../../../shared/provider-usage.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 import { PROCESS_ENDED_DURING_TURN, ProviderTurnControlError, type ProviderContinuationRef, type ProviderHandle, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderTurnControlOptions, type ProviderTurnControlResult, type RoomTurnFileAccess, type RoomTurnImageDelivery, type SupervisedProviderAdapter } from "../provider-adapter.js";
 import { delay } from "../provider-evidence.js";
@@ -44,14 +44,17 @@ export class AntigravityProviderAdapter extends AntigravityAdapterBase implement
 
   /**
    * The context window comes from agy's own `usage_update`s. The account's
-   * limits are read with `agy -p /quota` at most every 30 seconds; a read that
-   * takes longer than a moment leaves the last reading, which the window shows as stale.
+   * limits need `agy -p /quota`, which is not ACP and calls Google, so they are
+   * read only when the owner opens the Overview (`refreshAccount`), and at most
+   * every 30 seconds. Every other read answers with the last reading. A read
+   * that takes longer than a moment leaves the last reading, which the window
+   * shows as stale.
    */
-  async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
+  async readUsage(providerHandle: ProviderHandle, options?: ProviderUsageReadOptions): Promise<ProviderUsage | null> {
     const handle = this.handles.get(providerHandle.workAttemptId);
     if (!handle || handle !== providerHandle || handle.terminal) return null;
     const now = Date.parse(this.deps.now());
-    if (!handle.quotaRead && (!handle.quotaReadAt || now - handle.quotaReadAt >= 30_000)) {
+    if (options?.refreshAccount === true && !handle.quotaRead && (!handle.quotaReadAt || now - handle.quotaReadAt >= 30_000)) {
       handle.quotaReadAt = now;
       const reading = this.deps.readQuota(this.agyBin).then((output) => {
         const windows = parseAntigravityQuota(output, handle.currentModel, this.deps.now());

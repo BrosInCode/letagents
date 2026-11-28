@@ -180,8 +180,9 @@ const QUOTA_JSON = JSON.stringify({ status: "SUCCESS", response: "", command: { 
   ] },
 ] } } });
 
-function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastStepError?: string | null; backgroundQuietMs?: number; workspaceRefusal?: (cwd: string, when: "start" | "turn") => string | null } = {}) {
+function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastStepError?: string | null; backgroundQuietMs?: number; workspaceRefusal?: (cwd: string, when: "start" | "turn") => string | null; now?: () => string } = {}) {
   const agy = over.agy ?? new FakeAgy();
+  const quotaReads: string[] = [];
   const launches: Array<{ agyBin: string; args: string[]; cwd: string; env: Record<string, string> }> = [];
   const signals: Array<[number, NodeJS.Signals]> = [];
   let alive = true;
@@ -198,7 +199,7 @@ function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastSt
   } }));
   const dependencies: AntigravityProviderAdapterDependencies = {
     readVersion: async () => over.version ?? "1.5.15",
-    readQuota: async () => over.quota ?? QUOTA_JSON,
+    readQuota: async (agyBin) => { quotaReads.push(agyBin); return over.quota ?? QUOTA_JSON; },
     readLastStepError: async () => over.lastStepError ?? null,
     prepareOwnerSetup: (agentDir, enabled) => prepareAntigravityOwnerSetup(agentDir, enabled, ownerDir),
     shareSignIn: (agentDir) => shareAntigravitySignIn(agentDir, ownerDir),
@@ -213,11 +214,11 @@ function harness(over: { version?: string; agy?: FakeAgy; quota?: string; lastSt
     },
     getProcessIdentity: () => (alive ? BIRTH : null),
     observeProcessExit: async () => ({ type: "exit", code: 0, signal: null }),
-    now: () => new Date().toISOString(),
+    now: over.now ?? (() => new Date().toISOString()),
   };
   const adapter = new AntigravityProviderAdapter({ agyBin: "/bin/agy", dependencies, dataRoot, stopGraceMs: 20, turnControlTimeoutMs: 200, initTimeoutMs: 2_000,
     backgroundQuietMs: over.backgroundQuietMs ?? 30, backgroundReplyWaitMs: 500, backgroundCommandWaitLimitMs: 2_000 });
-  return { adapter, agy, launches, signals, dataRoot, ownerDir };
+  return { adapter, agy, launches, signals, dataRoot, ownerDir, quotaReads };
 }
 
 function spawnRequest(profile: "read_only" | "auto_review" | "full_access" = "read_only", over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
@@ -542,7 +543,8 @@ test("a model family and an effort become agy's model and thinking level; a leve
 });
 
 test("usage: the context window from agy's updates, the account limits of the agent's own model group", async () => {
-  const { adapter, agy } = harness();
+  let clock = Date.parse("2026-11-28T10:00:00.000Z");
+  const { adapter, agy, quotaReads } = harness({ now: () => new Date(clock).toISOString() });
   agy.onPrompt = (fake, message) => {
     fake.update({ sessionUpdate: "usage_update", used: 52_000, size: 1_048_576 });
     fake.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } });
@@ -550,11 +552,27 @@ test("usage: the context window from agy's updates, the account limits of the ag
   };
   const handle = await adapter.spawn(spawnRequest("read_only", { model: "gemini-4-neon", reasoningEffort: "high" }));
   await adapter.runRoomTurn(handle, turnRequest);
-  const usage = await adapter.readUsage(handle);
+  // A read that does not come from the Overview never runs `agy -p /quota`, which calls Google outside ACP.
+  const background = await adapter.readUsage(handle);
+  assert.equal(background?.context?.usedTokens, 52_000);
+  assert.equal(background?.account.state, "unavailable");
+  assert.deepEqual(quotaReads, []);
+  const usage = await adapter.readUsage(handle, { refreshAccount: true });
+  assert.deepEqual(quotaReads, ["/bin/agy"]);
   assert.equal(usage?.context?.usedTokens, 52_000);
   assert.equal(usage?.context?.capacityTokens, 1_048_576);
   assert.equal(usage?.account.state, "available");
   assert.deepEqual(usage?.account.windows.map((window) => [window.label, window.usedPercent]), [["5 hours", 7], ["Weekly", 90]]);
+  // Later reads keep that reading; an hour later, only another Overview open reads again.
+  clock += 60 * 60_000;
+  const kept = await adapter.readUsage(handle, { refreshAccount: false });
+  assert.deepEqual(kept?.account, usage?.account);
+  assert.deepEqual(quotaReads, ["/bin/agy"]);
+  // Opening the Overview again within 30 seconds of a read keeps the reading.
+  await adapter.readUsage(handle, { refreshAccount: true });
+  clock += 10_000;
+  await adapter.readUsage(handle, { refreshAccount: true });
+  assert.deepEqual(quotaReads, ["/bin/agy", "/bin/agy"]);
 });
 
 test("Ask before writes: an edit waits for the owner's answer, as a Claude-shaped request the approval path serves", async () => {
@@ -640,7 +658,7 @@ test("a command left running after end_turn keeps the turn open until agy's own 
 });
 
 test("a turn whose last conversation step is an error ends as that failure, not as an answer", async () => {
-  const { adapter, agy } = harness({ lastStepError: "Antigravity's usage limit for this model is reached. The turn ended without a reply." });
+  const { adapter, agy } = harness({ lastStepError: "You may have run out of Antigravity usage for this model. Antigravity answered with a usage limit error. The turn ended without a reply." });
   agy.onPrompt = (fake, message) => {
     fake.update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Error 429" } });
     fake.reply(message, { stopReason: "end_turn" });
@@ -654,7 +672,7 @@ test("a turn whose last conversation step is an error ends as that failure, not 
 test("agy's error steps read back as the owner's reason, from a copy of the conversation database", async () => {
   const { antigravityStepErrorMessage, readAntigravityLastStepError } = await import("#provider-runtime/agents/antigravity/turn-errors.js");
   assert.match(antigravityStepErrorMessage("Error 429, Message: Resource has been exhausted, Status: RESOURCE_EXHAUSTED quotaResetTimeStamp\":\"2026-11-24T08:00:00Z"),
-    /usage limit for this model is reached; it resets at 2026-11-24T08:00:00.000Z/);
+    /^You may have run out of Antigravity usage for this model\. Antigravity answered with a usage limit error; the limit resets at 2026-11-24T08:00:00\.000Z\. The turn ended/);
   assert.match(antigravityStepErrorMessage("NOT_FOUND (code 404): model gemini-x is not available"), /request failed \(NOT_FOUND 404\): model gemini-x is not available/);
   const { DatabaseSync } = await import("node:sqlite");
   const folder = mkdtempSync(join(tmpdir(), "letagents-agy-db-"));

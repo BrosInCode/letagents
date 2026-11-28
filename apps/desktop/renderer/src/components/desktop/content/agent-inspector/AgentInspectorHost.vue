@@ -14,7 +14,7 @@
         @retry="retryStatus"
         @open-reasoning="emit('open-reasoning', $event)"
         @reveal-live-request="emit('reveal-live-request', $event)"
-        @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
+        @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @overview-selected="emit('overview-selected')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="(overwrite: boolean, restart?: boolean) => emit('settings-save', overwrite, restart)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
@@ -41,7 +41,7 @@
         @retry="retryStatus"
         @open-reasoning="emit('open-reasoning', $event)"
         @reveal-live-request="emit('reveal-live-request', $event)"
-        @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
+        @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @overview-selected="emit('overview-selected')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="(overwrite: boolean, restart?: boolean) => emit('settings-save', overwrite, restart)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
@@ -122,6 +122,7 @@ const emit = defineEmits<{
   action: [intent: AgentInspectorActionIntent];
   "presentation-change": [compact: boolean];
   "live-selected": [];
+  "overview-selected": [];
   "live-dismissed": [];
   "work-selected": [];
   "work-retry": [];

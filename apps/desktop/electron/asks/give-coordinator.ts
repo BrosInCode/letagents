@@ -469,7 +469,8 @@ export class AskGiveCoordinator {
   }
 
   private async readUsage(entryId: string, roomId: string): Promise<ProviderUsage | null> {
-    const detail = await this.daemon.getAgentInspectorDetail({ entryId, roomId }).catch(() => null);
+    // Giving needs the limits as they are now, not as an Inspector last read them.
+    const detail = await this.daemon.getAgentInspectorDetail({ entryId, roomId, refreshAccountUsage: true }).catch(() => null);
     return detail?.usage ?? null;
   }
 

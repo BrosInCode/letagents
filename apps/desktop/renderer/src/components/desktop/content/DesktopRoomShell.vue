@@ -323,7 +323,7 @@
       @action="runAgentInspectorAction"
       @open-reasoning="openReasoningFromAgentDetail"
       @presentation-change="agentInspectorCompact = $event"
-      @work-selected="openAgentInspectorWork"
+      @work-selected="openAgentInspectorWork" @overview-selected="loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId, true, false, true)"
       @work-retry="loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId, true)"
       @work-source-select="selectAgentInspectorWorkSource"
       @reveal-message="revealAgentInspectorWorkMessage"

@@ -3797,7 +3797,7 @@
       "retireAgentMs": 60000
     },
     "defaultMaxRequestBytes": 65536,
-    "implementationVersion": "2.0.296",
+    "implementationVersion": "2.0.297",
     "localBoardMaxFrameBytes": 16777216,
     "protocolVersion": 3,
     "stateActivitySummaryLimit": 16,
@@ -5638,6 +5638,9 @@
         "properties": {
           "entry_id": {
             "type": "string"
+          },
+          "refresh_account_usage": {
+            "type": "boolean"
           },
           "room_id": {
             "type": "string"

@@ -872,7 +872,11 @@ export interface DesktopSupervisorAttemptDetail {
   restartCount: number;
   activity: DesktopSupervisorActivityEvent[];
 }
-export interface DesktopSupervisorAgentInspectorDetailInput { entryId: string; roomId: string; sourceMessageId?: string | null; }
+export interface DesktopSupervisorAgentInspectorDetailInput {
+  entryId: string; roomId: string; sourceMessageId?: string | null;
+  /** The owner opened the Overview, or needs current limits: the provider's account limits may be read again. */
+  refreshAccountUsage?: boolean;
+}
 export interface DesktopSupervisorAgentInspectorHistoryBoundary { earliest_retained_observed_message_id: string | null; earliest_retained_inbox_message_id: string | null; earliest_retained_receipt_sequence: number | null; pruned_before_message_id: string | null; pruned_at: string | null; }
 export interface DesktopSupervisorAgentInspectorItem { source_message_id: string; inbox_item_id: string; state: Exclude<DesktopRoomAgentReceiptState, "queued_behind_blocked" | "restoring_conversation">; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; provider_turn_id: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; canonical_message_id: string | null; }
 export interface DesktopSupervisorUncertainEffect { effect_id: string; tool_name: string; mcp_request_id: string; error: string; created_at: string; updated_at: string; }

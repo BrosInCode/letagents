@@ -45,7 +45,7 @@ export interface DaemonControlOperations {
   retryRoomDelivery(input: RoomDeliveryControl): unknown;
   restoreAgentConversation(input: RoomDeliveryControl): unknown;
   skipRoomDelivery(input: RoomDeliveryControl): unknown;
-  getAgentInspectorDetail(entryId: string, roomId: string, sourceMessageId: string | null): unknown;
+  getAgentInspectorDetail(entryId: string, roomId: string, sourceMessageId: string | null, refreshAccountUsage: boolean): unknown;
   prepareBoundedEffect(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown; mutation: boolean;
@@ -281,6 +281,7 @@ export function createDaemonControlRequestHandler(
       params.entry_id,
       params.room_id,
       params.source_message_id,
+      params.refresh_account_usage === true,
     ),
     "supervisor.prepare_bounded_effect": (params) => operations.prepareBoundedEffect({
       entryId: params.entry_id,

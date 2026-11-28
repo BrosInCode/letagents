@@ -763,7 +763,8 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     if (!nonEmptyString(input.entryId) || !nonEmptyString(input.roomId) || (input.sourceMessageId !== undefined && input.sourceMessageId !== null && !nonEmptyString(input.sourceMessageId))) throw new Error("Agent inspector detail requires exact non-empty entry, room, and optional source identities.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentInspectorDetail) { this.invalidateReadyStatus(); throw new Error("This supervisor does not support agent inspector detail history."); }
-    const detail = await this.call("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null });
+    const detail = await this.call("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null,
+      ...(input.refreshAccountUsage === true ? { refresh_account_usage: true } : {}) });
     return mapAgentInspectorDetail(detail, input);
   }
 

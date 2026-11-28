@@ -133,15 +133,23 @@ export function createAgentInspectorBackgroundRefresh(now: () => number = Date.n
   return { refresh, reset() { active = null; completed = null; } };
 }
 
+/**
+ * One detail read per identity at a time; a later call joins it. A call that
+ * asks for the account's limits (`refreshAccountUsage`) joins only a read that
+ * asks for them too: otherwise it starts its own read, which takes over the
+ * earlier read's source-follow intent.
+ */
 export function createAgentInspectorDetailRequest() {
-  let active: { key: string; followDefaultSource: boolean; promise: Promise<void> } | null = null;
+  type Intent = { followDefaultSource: boolean; refreshAccountUsage: boolean };
+  let active: (Intent & { key: string; promise: Promise<void> }) | null = null;
   return {
-    run(key: string, followDefaultSource: boolean, read: (intent: { followDefaultSource: boolean }) => Promise<void>): Promise<void> {
-      if (active?.key === key) {
+    run(key: string, followDefaultSource: boolean, read: (intent: Intent) => Promise<void>, refreshAccountUsage = false): Promise<void> {
+      if (active?.key === key && (active.refreshAccountUsage || !refreshAccountUsage)) {
         active.followDefaultSource ||= followDefaultSource;
         return active.promise;
       }
-      const request = { key, followDefaultSource, promise: Promise.resolve() };
+      const request = { key, followDefaultSource: followDefaultSource || (active?.key === key && active.followDefaultSource),
+        refreshAccountUsage, promise: Promise.resolve() };
       active = request;
       request.promise = read(request).finally(() => { if (active === request) active = null; });
       return request.promise;

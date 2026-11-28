@@ -134,6 +134,19 @@ test("a lease holder's failure that the owner can clear still blocks until Retry
   }
 });
 
+test("Antigravity's usage limit error is an account limit, in its old and its new words", async () => {
+  const { antigravityStepErrorMessage } = await import("#provider-runtime/agents/antigravity/turn-errors.js");
+  for (const reason of [
+    antigravityStepErrorMessage("Error 429, Message: Resource has been exhausted, Status: RESOURCE_EXHAUSTED"),
+    antigravityStepErrorMessage("Error 429, Status: RESOURCE_EXHAUSTED quotaResetTimeStamp\":\"2026-11-24T08:00:00Z"),
+    "Antigravity's usage limit for this model is reached. The turn ended without a reply.",
+  ]) {
+    const policy = taskFailurePolicy(reason, 1);
+    assert.equal(policy.automatic, false, reason);
+    assert.match(policy.detail, /insufficient credit or quota/, reason);
+  }
+});
+
 test("only the provider's own result marks a turn refused: a message that arrives claiming it is treated as any other", async () => {
   const reason = "unexpected status 401 Unauthorized: the provider rejected this key.";
   const { receipts, sources } = await runNoReplyContinuity([reason], [["1"], ["2"]], [], { task_continuity_refusal: true });

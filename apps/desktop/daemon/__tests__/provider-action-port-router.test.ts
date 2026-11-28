@@ -2007,6 +2007,19 @@ test("usage reads use the acquired native connection and discard replacement res
   assert.equal(await reading, null);
 });
 
+test("a usage read may refresh the account's limits only when its caller asks", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "usage-refresh", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const usage = { providerContinuationId: handle.providerContinuationId!, account: { state: "available" as const, windows: [] }, context: null, compaction: null };
+  const seen: unknown[] = [];
+  adapter.readUsage = async (_handle: unknown, options?: unknown) => { seen.push(options); return usage; };
+  await router.readUsage(handle);
+  await router.readUsage(handle, { refreshAccount: true });
+  await router.readUsage(handle, { refreshAccount: false });
+  assert.deepEqual(seen, [{ refreshAccount: false }, { refreshAccount: true }, { refreshAccount: false }]);
+});
+
 for (const race of ["turn_started", "turn_finished", "continuation", "owned_handle", "exit"] as const) {
   test(`Cursor usage discards a reading after ${race} changes during inspection`, async () => {
     let pid: number | null = race === "turn_finished" ? 123 : null;

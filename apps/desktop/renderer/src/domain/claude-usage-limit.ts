@@ -22,7 +22,7 @@ export function isFableUsageWindow(id: string): boolean {
 }
 
 /** Claude's message is evidence for the limit it names, even after a model change. */
-export function claudeLimitNotice(error: string | null | undefined, provider?: string | null) {
+export function claudeLimitNotice(error: string | null | undefined, provider?: string | null): ClaudeLimitNotice | null {
   if (!error || (provider && provider !== "claude-code" && provider !== "claude")) return null;
   const family = /(?:reached|hit|exceeded)\s+your\s+(fable|opus|sonnet)(?:\s+[\d.]+)?\s+limit/i.exec(error)?.[1]?.toLowerCase();
   const credits = /^(?:fable(?:\s+[\d.]+)?\s+requires usage credits|you['’]re out of (?:usage credits|extra usage)|credit balance is too low)/i.test(error.trim());
@@ -39,7 +39,12 @@ export function claudeLimitNotice(error: string | null | undefined, provider?: s
       : "Claude paused this request. Check your allowance and usage credits in Claude.",
     modelFamily: label?.toLowerCase() ?? null,
     reset: reset && !/[:/]{2}|https?:/i.test(reset) ? reset : null,
+    usageLink: { url: CLAUDE_USAGE_URL, label: "Manage Claude usage" },
   };
 }
 
-export type ClaudeLimitNotice = NonNullable<ReturnType<typeof claudeLimitNotice>>;
+/** A provider's usage-limit notice. `usageLink` is the provider's own usage page, when it has one. */
+export type ClaudeLimitNotice = {
+  title: string; detail: string; modelFamily: string | null; reset: string | null;
+  usageLink: { url: string; label: string } | null;
+};

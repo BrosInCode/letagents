@@ -1551,6 +1551,21 @@ test("read model projects live launch progress only for an agent meant to run", 
   assert.equal((await model.entryWithDerivedLiveness({ ...starting, desired_state: "stopped" })).launch_progress, null);
 });
 
+test("only an Overview read lets the adapter read the account's limits again", async () => {
+  const handle = { workAttemptId: "usage-attempt", providerContinuationId: "thread" } as any;
+  const current: DaemonManifestEntry = { ...entry, id: "usage-agent", room_id: "usage-room", work_attempt_id: "usage-attempt",
+    provider_ref: { work_attempt_id: "usage-attempt", provider_continuation_id: "thread", execution_generation_id: "execution", provider_connection: null } };
+  const seen: unknown[] = [];
+  const model = new DaemonReadModel({
+    manifest: { getEntry: async () => current }, currentDaemonGeneration: () => 4, liveHandles: new Map([[current.id, handle]]),
+    inbox: { detail: async () => ({ availability: "not_loaded" }) },
+    readUsage: async (_received: unknown, options: unknown) => { seen.push(options); return null; },
+  } as any);
+  await model.inspectorDetail(current.id, "usage-room", null);
+  await model.inspectorDetail(current.id, "usage-room", null, true);
+  assert.deepEqual(seen, [{ refreshAccount: false }, { refreshAccount: true }]);
+});
+
 test("inspector usage is read for the exact live continuation and drops races during the read", async () => {
   for (const mutation of ["none", "room", "continuation", "execution", "daemon", "handle", "failure"] as const) {
     const handle = { workAttemptId: "usage-attempt", providerContinuationId: "thread" } as any;
