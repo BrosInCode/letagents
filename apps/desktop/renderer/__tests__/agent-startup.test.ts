@@ -200,6 +200,52 @@ test("a refused start names the launch's own reason on the row", () => {
   assert.equal(view.line, `Could not start: ${reason}`);
 });
 
+test("an Open Model context-window failure names the actionable setup reason on the row", () => {
+  const reason = "The model endpoint did not provide a context window for this model. Set its context window in Open Model settings, save it as the default model, and try again.";
+  const authRejected = "The model endpoint rejected authentication (HTTP 401) while checking this model's context window. Check your API key in Open Model settings, or set its context window and save it as the default model, then try again.";
+
+  const manifestOnly = agentStartupView(entry({
+    provider: "open-model",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/open-model-wt",
+    lastError: `convergence scheduler failure: ${reason}`,
+  }), context, T0);
+  assert.equal(manifestOnly.status, "failed");
+  assert.equal(manifestOnly.line, `Could not start: ${reason}`);
+  assert.deepEqual(manifestOnly.failure, { reason, action: "retry" });
+
+  // Live launchProgress failure with condition still "none" (before scheduler writes coordination_blocked).
+  const liveProgressFailed = progress([["prepare", 200], ["process", 400]], null,
+    { state: "failed", failure: { phase: "process", action: "retry" } });
+  const liveMissingContext = agentStartupView(entry({
+    provider: "open-model",
+    observedState: "starting",
+    condition: "none",
+    workspacePath: "/tmp/open-model-wt",
+    launchProgress: liveProgressFailed,
+    lastError: `convergence scheduler failure: ${reason}`,
+  }), context, T0 + 1_000);
+  assert.equal(liveMissingContext.status, "failed");
+  assert.equal(liveMissingContext.line, `Could not start: ${reason}`);
+  assert.deepEqual(liveMissingContext.failure, { reason, action: "retry" });
+
+  // Even if an older daemon tags HTTP 401/403 as sign_in, Open Model never says "OpenCode is not signed in".
+  const staleSignInProgress = progress([["prepare", 200], ["process", 400]], null,
+    { state: "failed", failure: { phase: "process", action: "sign_in" } });
+  const liveAuthRejected = agentStartupView(entry({
+    provider: "open-model",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/open-model-wt",
+    launchProgress: staleSignInProgress,
+    lastError: `convergence scheduler failure: ${authRejected}`,
+  }), context, T0 + 1_000);
+  assert.equal(liveAuthRejected.status, "failed");
+  assert.equal(liveAuthRejected.line, `Could not start: ${authRejected}`);
+  assert.deepEqual(liveAuthRejected.failure, { reason: authRejected, action: "retry" });
+});
+
 test("scheduler internals never reach the failure line", () => {
   const view = agentStartupView(entry({ observedState: "failed", condition: "quarantined", lastError: "convergence scheduler failure: x" }), context, T0);
   assert.equal(view.line, "Could not start: The start did not finish.");
