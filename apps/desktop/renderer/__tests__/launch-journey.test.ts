@@ -258,6 +258,29 @@ test("project preparation failure before provider creation offers retry, not rec
   assert.match(view.failureDetail ?? "", /prepare the private project area/i);
 });
 
+test("Open Model missing context window failure surfaces the actionable reason instead of a generic start error", () => {
+  const reason = "The model endpoint did not provide a context window for this model. Set its context window in Open Model settings, save it as the default model, and try again.";
+  const view = foldLaunchJourney({
+    entry: entry({
+      provider: "open-model",
+      observedState: "starting",
+      condition: "coordination_blocked",
+      lastError: `convergence scheduler failure: ${reason}`,
+      workspacePath: "/tmp/open-model-wt",
+      workAttemptId: "attempt-1",
+      providerPid: null,
+      providerContinuationId: null,
+      executionGenerationId: null,
+    }),
+  });
+
+  assert.equal(view.status, "failed");
+  assert.equal(view.currentPhaseId, "starting_provider");
+  assert.equal(view.recovery, "retry");
+  assert.equal(view.headline, "Couldn't add the Open Model agent");
+  assert.equal(view.failureDetail, reason);
+});
+
 test("folding is idempotent under duplicate and out-of-order delivery", () => {
   const ordered = foldLaunchJourney({
     events: [

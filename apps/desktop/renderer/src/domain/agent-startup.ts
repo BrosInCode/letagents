@@ -6,6 +6,7 @@ import type {
 import { avatarInitials } from "../../../../../shared/chat-appearance";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { startRefusalReason } from "./agent-home-harness";
+import { openModelLaunchFailureReason } from "./open-model-launch-error";
 import { supervisedLaunchProgress } from "./supervised-launch";
 import { thisComputerLabel } from "./supervised-agents-support";
 
@@ -171,7 +172,7 @@ function failureReason(action: AgentStartupAction, entry: Entry): string {
 
 /** Scheduler internals are no reason a person can act on. */
 function safeManifestDetail(detail: string | null): string {
-  const refusal = startRefusalReason(detail);
+  const refusal = startRefusalReason(detail) ?? openModelLaunchFailureReason(detail);
   if (refusal) return refusal;
   if (!detail?.trim() || /convergence scheduler failure|scheduler failure:/i.test(detail)) return "The start did not finish.";
   return detail;

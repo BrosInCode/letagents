@@ -200,6 +200,18 @@ test("a refused start names the launch's own reason on the row", () => {
   assert.equal(view.line, `Could not start: ${reason}`);
 });
 
+test("an Open Model context-window failure names the actionable setup reason on the row", () => {
+  const reason = "The model endpoint did not provide a context window for this model. Set its context window in Open Model settings, save it as the default model, and try again.";
+  const view = agentStartupView(entry({
+    provider: "open-model",
+    observedState: "failed",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/open-model-wt",
+    lastError: `convergence scheduler failure: ${reason}`,
+  }), context, T0);
+  assert.equal(view.line, `Could not start: ${reason}`);
+});
+
 test("scheduler internals never reach the failure line", () => {
   const view = agentStartupView(entry({ observedState: "failed", condition: "quarantined", lastError: "convergence scheduler failure: x" }), context, T0);
   assert.equal(view.line, "Could not start: The start did not finish.");

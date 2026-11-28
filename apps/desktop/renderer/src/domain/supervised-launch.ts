@@ -5,6 +5,7 @@ import { agentCompactionProgress } from "./managed-agents";
 import { startRefusalReason } from "./agent-home-harness";
 import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
+import { openModelLaunchFailureReason } from "./open-model-launch-error";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
 /**
@@ -136,7 +137,9 @@ function missingProviderRuntimeDetail(entry: LaunchFields, providerLabel: string
  * to friendly, retryable copy. */
 const INTERNAL_SCHEDULER_FAILURE = /^convergence scheduler failure:/i;
 function provisioningFailureDetail(lastError: string | null | undefined, fallback: string): string {
-  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) return startRefusalReason(lastError) ?? fallback;
+  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) {
+    return startRefusalReason(lastError) ?? openModelLaunchFailureReason(lastError) ?? fallback;
+  }
   return safeUserVisibleErrorDetail(lastError, fallback);
 }
 
@@ -202,7 +205,9 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     && !stopFailed;
   const stopped = entry.desiredState === "stopped" && entry.observedState === "stopped";
   const ready = entry.desiredState === "running" && reached >= 4;
+  const openModelFailure = openModelLaunchFailureReason(entry.lastError);
   const recoverableBlocked = hasProviderExecution
+    && !openModelFailure
     && !ready
     && !stopFailed
     && !stopping
@@ -238,6 +243,8 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
         ? safeUserVisibleErrorDetail(entry.lastError, `The supervisor couldn't stop the ${providerLabel} agent. Check its status and try again.`)
         : claudeUsageLimitReached(entry.lastError)
         ? CLAUDE_USAGE_LIMIT_REASON
+        : openModelFailure
+        ? openModelFailure
         : entry.condition === "coordination_blocked" && hasProviderExecution
         ? `LetAgents can't currently reconnect to the previous ${providerLabel} process. It may still reconnect; you can wait or cancel this launch and start a new agent.`
         : entry.condition === "coordination_blocked"

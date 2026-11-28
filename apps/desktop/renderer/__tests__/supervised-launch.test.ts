@@ -516,6 +516,44 @@ test("a refused start shows the launch's own reason, without the scheduler's pre
   assert.equal(progress.failureDetail, reason);
 });
 
+test("Open Model context-window and endpoint setup failures surface verbatim without the scheduler prefix", () => {
+  const missingContext = "The model endpoint did not provide a context window for this model. Set its context window in Open Model settings, save it as the default model, and try again.";
+  const authRejected = "The model endpoint rejected authentication (HTTP 401) while checking this model's context window. Check your API key in Open Model settings, or set its context window and save it as the default model, then try again.";
+
+  const fresh = supervisedLaunchProgress(entry({
+    provider: "open-model",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/open-model-wt",
+    lastError: `convergence scheduler failure: ${missingContext}`,
+  }));
+  assert.equal(fresh.failed, true);
+  assert.equal(fresh.recoverableBlocked, false);
+  assert.equal(fresh.failureDetail, missingContext);
+
+  const afterPriorGeneration = supervisedLaunchProgress(entry({
+    provider: "open-model",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/open-model-wt",
+    executionGenerationId: "exec-1",
+    lastError: `convergence scheduler failure: ${authRejected}`,
+  }));
+  assert.equal(afterPriorGeneration.failed, true);
+  assert.equal(afterPriorGeneration.recoverableBlocked, false);
+  assert.equal(afterPriorGeneration.failureDetail, authRejected);
+
+  const quarantined = supervisedLaunchProgress(entry({
+    provider: "open-model",
+    observedState: "failed",
+    condition: "quarantined",
+    workspacePath: "/tmp/open-model-wt",
+    lastError: `convergence scheduler failure: ${missingContext}`,
+  }));
+  assert.equal(quarantined.failed, true);
+  assert.equal(quarantined.failureDetail, missingContext);
+});
+
 test("a stop the daemon could not apply stays a failed stop, with Retry, even with no provider", () => {
   const progress = supervisedLaunchProgress(entry({
     desiredState: "stopped", observedState: "starting", condition: "coordination_blocked",
