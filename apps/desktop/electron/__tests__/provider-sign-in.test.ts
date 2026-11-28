@@ -1,6 +1,6 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +15,7 @@ import {
   ProviderSignInService,
   resolveProviderSignInPlan,
   stopTerminalSignIn,
+  terminalSignInScript,
   type ProviderSignInDependencies,
   type ProviderSignInPlan,
 } from "../main/agents/provider-sign-in.js";
@@ -375,4 +376,26 @@ test("every provider preflight resolves its program through the shared provider 
   assert.equal(providers.match(/= providerCli\(provider\.id, provider\.runtimeCommand\);/g)?.length, 3, "Codex, Claude Code and Antigravity");
   assert.match(cursor, /providerCli\(provider\.id, provider\.runtimeCommand, runtimeEnv\)/);
   assert.doesNotMatch(providers, /resolveCodexExecutable|resolveClaudeCodeExecutable|resolveAntigravityExecutable/);
+});
+
+test("a cancel before Terminal runs the sign-in script stops it before the provider starts", { skip: process.platform === "win32" }, () => {
+  const scratch = mkdtempSync(join(tmpdir(), "sign-in-script-"));
+  const marker = join(scratch, "provider-started");
+  const provider = join(scratch, "fake-agy");
+  writeFileSync(provider, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o700 });
+  const run = (pidFolder: string) => {
+    const script = join(scratch, "run.command");
+    writeFileSync(script, terminalSignInScript(plan({ mode: "terminal", command: provider, args: [] }), join(scratch, "gone"), pidFolder), { mode: 0o700 });
+    execFileSync("/bin/sh", [script], { stdio: "ignore" });
+  };
+
+  // Cancelled first: stopTerminalSignIn deleted the PID folder.
+  run(join(scratch, "deleted-pid-folder"));
+  assert.equal(existsSync(marker), false, "the provider never starts after a cancel");
+
+  // Not cancelled: the script records its PID and runs the provider.
+  const pidFolder = mkdtempSync(join(tmpdir(), "sign-in-pid-"));
+  run(pidFolder);
+  assert.equal(existsSync(marker), true, "the provider starts");
+  assert.ok(Number(readFileSync(join(pidFolder, "pid"), "utf8")) > 1, "its process ID is recorded");
 });

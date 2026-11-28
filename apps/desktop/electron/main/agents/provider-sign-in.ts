@@ -177,21 +177,33 @@ export function stopTerminalSignIn(pidFolder: string, command: string): void {
   rmSync(pidFolder, { recursive: true, force: true });
 }
 
+/**
+ * The script macOS Terminal runs for a sign-in. It records its process ID (which
+ * `exec` hands to the provider) for stopTerminalSignIn, and it stops without
+ * starting the provider when a cancel removed the PID folder first.
+ */
+export function terminalSignInScript(plan: ProviderSignInPlan, folder: string, pidFolder: string): string {
+  const keys = ["HOME", "PATH", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "AGY_CLI_DISABLE_AUTO_UPDATE"];
+  return [
+    "#!/bin/sh",
+    `rm -rf -- ${shellQuote(folder)}`,
+    // exec keeps this process ID, so it becomes the provider's. A cancel that
+    // came before Terminal ran this script deleted the folder: then stop here.
+    `echo $$ > ${shellQuote(join(pidFolder, "pid"))} || exit 0`,
+    ...keys.flatMap((key) => plan.env[key] ? [`export ${key}=${shellQuote(plan.env[key]!)}`] : []),
+    // A cancel between the line above and here removed the file: stop too.
+    `[ -f ${shellQuote(join(pidFolder, "pid"))} ] || exit 0`,
+    `exec ${shellQuote(plan.command)} ${plan.args.map(shellQuote).join(" ")}`.trimEnd(),
+    "",
+  ].join("\n");
+}
+
 /** Opens macOS Terminal on the provider, with the provider's home and PATH. The script deletes itself when it runs. */
 async function openTerminalSignIn(plan: ProviderSignInPlan): Promise<TerminalSignInHandle> {
   const folder = mkdtempSync(join(tmpdir(), "letagents-sign-in-"));
   const pidFolder = mkdtempSync(join(tmpdir(), "letagents-sign-in-pid-"));
   const script = join(folder, `Sign in to ${plan.providerName}.command`);
-  const keys = ["HOME", "PATH", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "AGY_CLI_DISABLE_AUTO_UPDATE"];
-  writeFileSync(script, [
-    "#!/bin/sh",
-    `rm -rf -- ${shellQuote(folder)}`,
-    // exec keeps this process ID, so it becomes the provider's.
-    `echo $$ > ${shellQuote(join(pidFolder, "pid"))}`,
-    ...keys.flatMap((key) => plan.env[key] ? [`export ${key}=${shellQuote(plan.env[key]!)}`] : []),
-    `exec ${shellQuote(plan.command)} ${plan.args.map(shellQuote).join(" ")}`.trimEnd(),
-    "",
-  ].join("\n"), { mode: 0o700 });
+  writeFileSync(script, terminalSignInScript(plan, folder, pidFolder), { mode: 0o700 });
   try {
     await new Promise<void>((resolve, reject) => {
       execFile("/usr/bin/open", ["-a", "Terminal", script], (error) => (error ? reject(error) : resolve()));
