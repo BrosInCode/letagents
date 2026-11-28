@@ -1,8 +1,10 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
-import type { ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -12,6 +14,8 @@ import {
   parseSignInOutput,
   ProviderSignInService,
   resolveProviderSignInPlan,
+  stopTerminalSignIn,
+  terminalSignInScript,
   type ProviderSignInDependencies,
   type ProviderSignInPlan,
 } from "../main/agents/provider-sign-in.js";
@@ -97,6 +101,20 @@ test("sign-in output parsing finds the link, the device code and the paste promp
   assert.equal(codex.url, "https://auth.openai.com/codex/device");
   assert.equal(codex.code, "37UV-E7QNH");
   assert.equal(codex.acceptsCode, false);
+
+  // `codex login` (the browser sign-in the app runs): the local callback is
+  // http, so the first https link is the sign-in page, and there is no code.
+  const codexBrowser = parseSignInOutput([
+    "Starting local login server on http://localhost:1455.",
+    "If your browser did not open, navigate to this URL to authenticate:",
+    "",
+    "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_X&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback&state=ABCD-EFGHI",
+    "",
+    "On a remote or headless machine? Use `codex login --device-auth` instead.",
+  ].join("\n"));
+  assert.match(codexBrowser.url ?? "", /^https:\/\/auth\.openai\.com\/oauth\/authorize\?response_type=code&/);
+  assert.equal(codexBrowser.code, null);
+  assert.equal(codexBrowser.acceptsCode, false);
 
   const claude = parseSignInOutput([
     "Opening browser to sign in…",
@@ -240,6 +258,72 @@ test("a Terminal sign-in checks the provider until it is signed in", async () =>
   assert.deepEqual(order, ["starting", "terminal", "waiting", "probe-cache-cleared", "signed_in"]);
 });
 
+test("a Terminal sign-in ends the provider it started when it signs in, is cancelled or runs out of time", async () => {
+  const run = async (finishWith: "signed_in" | "cancel" | "timeout") => {
+    let stops = 0;
+    const { service, updates } = harness({
+      plan: plan({ mode: "terminal", providerName: "Antigravity", command: "/fake/agy", args: [], verify: async () => finishWith === "signed_in" }),
+      deps: {
+        openTerminal: async () => ({ stop: () => { stops += 1; } }),
+        timeoutMs: finishWith === "timeout" ? 20 : 60_000,
+      },
+    });
+    await service.start("antigravity");
+    assert.equal(stops, 0, "the provider runs while the person signs in");
+    if (finishWith === "cancel") service.cancel("antigravity");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    service.cancelAll();
+    return { stops, state: updates.at(-1)!.state };
+  };
+  assert.deepEqual(await run("signed_in"), { stops: 1, state: "signed_in" });
+  assert.deepEqual(await run("cancel"), { stops: 1, state: "cancelled" });
+  assert.deepEqual(await run("timeout"), { stops: 1, state: "failed" });
+});
+
+test("a cancel while Terminal opens still ends the provider that opens", async () => {
+  let stops = 0;
+  let opened!: () => void;
+  const { service, updates } = harness({
+    plan: plan({ mode: "terminal", providerName: "Antigravity", command: "/fake/agy", args: [], verify: async () => false }),
+    deps: {
+      openTerminal: () => new Promise((resolve) => {
+        opened = () => resolve({ stop: () => { stops += 1; } });
+      }),
+    },
+  });
+  const started = service.start("antigravity");
+  await settle();
+  service.cancel("antigravity");
+  opened();
+  await started;
+  assert.equal(stops, 1);
+  assert.equal(updates.at(-1)!.state, "cancelled");
+});
+
+test("stopping a Terminal sign-in signals only the recorded provider process", { skip: process.platform === "win32" }, async () => {
+  const folder = () => mkdtempSync(join(tmpdir(), "sign-in-pid-test-"));
+  const sleeper = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+  const exited = new Promise<NodeJS.Signals | null>((resolve) => sleeper.once("exit", (_code, signal) => resolve(signal)));
+  try {
+    const other = folder();
+    writeFileSync(join(other, "pid"), String(sleeper.pid));
+    stopTerminalSignIn(other, "/fake/agy");
+    assert.equal(sleeper.exitCode, null, "a process that is not the provider is left alone");
+    assert.equal(existsSync(other), false, "the record is removed either way");
+
+    const mine = folder();
+    writeFileSync(join(mine, "pid"), String(sleeper.pid));
+    stopTerminalSignIn(mine, "/usr/local/bin/sleep");
+    assert.equal(await exited, "SIGTERM");
+    assert.equal(existsSync(mine), false);
+
+    const missing = folder();
+    assert.doesNotThrow(() => stopTerminalSignIn(missing, "/fake/agy"), "no record yet is not an error");
+  } finally {
+    sleeper.kill("SIGKILL");
+  }
+});
+
 test("sign-in runs each provider's program in the environment its preflight uses", () => {
   const base: NodeJS.ProcessEnv = {
     PATH: "/fake/bin:/usr/bin",
@@ -254,7 +338,7 @@ test("sign-in runs each provider's program in the environment its preflight uses
     CURSOR_API_KEY: "must-not-pass",
   };
   const expected: Record<string, { args: string[] }> = {
-    codex: { args: ["login", "--device-auth"] },
+    codex: { args: ["login"] },
     "claude-code": { args: ["auth", "login"] },
     cursor: { args: ["login"] },
   };
@@ -292,4 +376,26 @@ test("every provider preflight resolves its program through the shared provider 
   assert.equal(providers.match(/= providerCli\(provider\.id, provider\.runtimeCommand\);/g)?.length, 3, "Codex, Claude Code and Antigravity");
   assert.match(cursor, /providerCli\(provider\.id, provider\.runtimeCommand, runtimeEnv\)/);
   assert.doesNotMatch(providers, /resolveCodexExecutable|resolveClaudeCodeExecutable|resolveAntigravityExecutable/);
+});
+
+test("a cancel before Terminal runs the sign-in script stops it before the provider starts", { skip: process.platform === "win32" }, () => {
+  const scratch = mkdtempSync(join(tmpdir(), "sign-in-script-"));
+  const marker = join(scratch, "provider-started");
+  const provider = join(scratch, "fake-agy");
+  writeFileSync(provider, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\n`, { mode: 0o700 });
+  const run = (pidFolder: string) => {
+    const script = join(scratch, "run.command");
+    writeFileSync(script, terminalSignInScript(plan({ mode: "terminal", command: provider, args: [] }), join(scratch, "gone"), pidFolder), { mode: 0o700 });
+    execFileSync("/bin/sh", [script], { stdio: "ignore" });
+  };
+
+  // Cancelled first: stopTerminalSignIn deleted the PID folder.
+  run(join(scratch, "deleted-pid-folder"));
+  assert.equal(existsSync(marker), false, "the provider never starts after a cancel");
+
+  // Not cancelled: the script records its PID and runs the provider.
+  const pidFolder = mkdtempSync(join(tmpdir(), "sign-in-pid-"));
+  run(pidFolder);
+  assert.equal(existsSync(marker), true, "the provider starts");
+  assert.ok(Number(readFileSync(join(pidFolder, "pid"), "utf8")) > 1, "its process ID is recorded");
 });

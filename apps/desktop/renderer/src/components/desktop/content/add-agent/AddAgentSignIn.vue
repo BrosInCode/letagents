@@ -1,6 +1,7 @@
 <template>
   <section
     v-if="needsSignIn || update"
+    ref="panel"
     class="desktop-add-agent-sign-in"
     data-testid="desktop-add-agent-sign-in"
     aria-label="Agent sign-in"
@@ -53,7 +54,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import AddAgentFeedback from "./AddAgentFeedback.vue";
 import type { ProviderSignInController } from "./useProviderSignIn";
 
@@ -66,6 +67,20 @@ const props = defineProps<{
 const emit = defineEmits<{ "copy-command": [] }>();
 
 const update = computed(() => props.controller.update.value);
+const panel = ref<HTMLElement | null>(null);
+// The panel sits below the model and access settings. When a sign-in starts
+// (or a new link or code arrives), bring it into view, or the person sees
+// only "Signing in..." in the footer.
+watch(
+  () => (props.controller.active.value && update.value ? `${update.value.state}:${update.value.url ?? ""}:${update.value.code ?? ""}` : null),
+  (key, previous) => {
+    if (!key || key === previous) return;
+    void nextTick(() => {
+      const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      panel.value?.scrollIntoView?.({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+    });
+  },
+);
 const heading = computed(() => {
   const state = update.value?.state;
   if (state === "starting") return "Starting sign-in...";
